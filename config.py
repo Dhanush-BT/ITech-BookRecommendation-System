@@ -6,6 +6,9 @@ Central configuration for the Syllabus <-> Book recommendation engine.
 MAX_TOC_SCAN_PAGES = 60          # how many pages (from the front) to scan looking for a TOC
 MIN_TOC_SCORE = 35               # a page needs at least this score to be considered part of the TOC
 TOC_MAX_CONTIG_GAP = 2           # allow up to N non-scoring pages between TOC pages before we stop
+TOC_MERGE_GAP = 6                # after grouping, absorb a nearby smaller run into the main TOC run
+                                  # if it's within this many pages (handles a low-scoring divider/plate
+                                  # page splitting one real TOC into two runs)
 
 # --- Chunking (kept for architecture completeness / future embedding upgrade) ---
 CHUNK_SIZE_WORDS = 500

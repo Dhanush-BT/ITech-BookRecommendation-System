@@ -28,7 +28,7 @@ COLUMNS = [
     ("chapter", 34),
     ("page_start", 10),
     ("page_end", 10),
-    ("coverage_%", 11),
+    ("match_confidence_%", 18),
     ("notes", 10),
 ]
 
@@ -79,7 +79,7 @@ def export_to_excel(rows: List[RecommendationRow], output_path: str):
             cell.font = BODY_FONT
             cell.border = THIN_BORDER
             col_name = COLUMNS[col_idx - 1][0]
-            if col_name in ("page_start", "page_end", "coverage_%", "id", "module_number", "year"):
+            if col_name in ("page_start", "page_end", "match_confidence_%", "id", "module_number", "year"):
                 cell.alignment = CENTER
             else:
                 cell.alignment = LEFT_WRAP

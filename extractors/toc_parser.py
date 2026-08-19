@@ -23,12 +23,22 @@ from indexing.text_cleaner import repair_spacing
 from utils.roman import is_roman_numeral, roman_to_int
 from utils.logger import log
 
-# Matches a leading numbering token: "4.2.3", "4", "I", "IV", "Appendix II"
+# Matches a leading numbering token: "4.2.3", "4", "A.1", "I", "IV", "Appendix II"
 LEAD_NUM_RE = re.compile(
     r"^\s*(Appendix|Chapter|Unit|Part|Module)?\s*"
-    r"((?:\d+\.)+\d+|\d+\.?|[IVXLCDM]+)?\s*[:.]?\s*(.*)$",
+    r"((?:\d+\.)+\d+|\d+\.?|[A-Z]\.\d+(?:\.\d+)*|[IVXLCDM]+)?\s*[:.]?\s*(.*)$",
     re.IGNORECASE,
 )
+# Some TOC layouts print a bullet/marker glyph before each numbered
+# subsection entry (e.g. a small square symbol). PDF text extraction often
+# turns that glyph into a stray junk character ("# 2.8 Impact Loading"),
+# which sits in front of the numbering token and defeats LEAD_NUM_RE (which
+# anchors at the start of the line) - the entry then gets no label at all
+# and is wrongly treated as a brand-new top-level chapter instead of the
+# numbered subsection it actually is. Strip a single such glyph up front,
+# but only when it's immediately followed by whitespace and then a digit,
+# so we never eat a real leading character from an ordinary title.
+LEADING_BULLET_RE = re.compile(r"^[^\w\s]{1,2}\s+(?=\d)")
 # A TOC line's trailing page number. PDF text extraction occasionally
 # inserts a single stray space *inside* a multi-digit number because of
 # font kerning (observed for real: "10" extracts as "1 0", "225" as "2 25"
@@ -69,6 +79,8 @@ def _numbering_level(label: str) -> int:
     label = label.strip()
     if re.match(r"^\d+(\.\d+)+$", label):
         return label.count(".") + 1
+    if re.match(r"^[A-Z](\.\d+)+$", label, re.IGNORECASE):
+        return label.count(".") + 1
     return 1
 
 
@@ -86,6 +98,15 @@ def _parse_entry_text(combined: str, raw_source: str) -> Optional[TOCEntry]:
     page_match = TRAILING_PAGE_RE.search(combined)
     if not page_match:
         return None
+    # Some books number appendix pages "A1", "A5", ... (a letter glued
+    # directly to the digits). TRAILING_PAGE_RE only anchors at the end of
+    # the line, so without this check "...Absolute Values A1" would read
+    # as plain page 1 - a real page number, silently corrupted, with a
+    # stray "A" left stuck to the title. A genuine page reference is always
+    # preceded by whitespace or a dot-leader, never a bare letter.
+    before_idx = page_match.start() - 1
+    if before_idx >= 0 and combined[before_idx].isalpha():
+        return None
     digits = "".join(_DIGIT_RE.findall(page_match.group(0)))
     if not digits:
         return None
@@ -95,6 +116,7 @@ def _parse_entry_text(combined: str, raw_source: str) -> Optional[TOCEntry]:
 
     body = combined[:page_match.start()].strip()
     body = _clean_leader_dots(body)
+    body = LEADING_BULLET_RE.sub("", body)
     if not body:
         return None
 

@@ -56,14 +56,16 @@ Each row of the output workbook is one (syllabus topic × recommended book) pair
 
 `id | subject_code | subject_name | module_number | module_title | topic | sub_topic |
 book_title | author | edition | publisher | year | book_type | chapter |
-page_start | page_end | coverage_% | notes`
+page_start | page_end | match_confidence_% | notes`
 
 A `Summary` sheet reports totals (rows, distinct topics, subjects, books).
 
 ## How matching works
 
 For every syllabus topic, every book is scored on four signals and combined
-into a single **coverage %**:
+into a single **match confidence %** (a similarity heuristic, not a verified
+measurement of how much of the topic's real content the book actually
+contains):
 
 | Signal    | Weight | What it measures                                             |
 |-----------|-------:|---------------------------------------------------------------|
@@ -78,6 +80,78 @@ score. Only the top 3 books per topic, above `MIN_COVERAGE_PERCENT`
 book genuinely covers it well.
 
 ## Bug fix history
+
+### Patch 3: overly-broad page ranges, duplicate rows, misleading coverage label
+
+Reported against a real generated report (`out.xls`) for CE3491 *Strength of
+Materials* matched against Gere, *Mechanics of Materials* (6th ed.): page
+ranges spanning 100-200+ pages and multiple unrelated chapters, a module
+mapped twice with near-identical scores, and no section-level granularity.
+Five compounding bugs were found and fixed, all verified against the real
+book/syllabus pair (before/after: "Shear Force and Bending Moment" went from
+matching a fabricated `page 300-506` chapter-wide span to the correct
+`4.5 Shear-Force and Bending-Moment Diagrams, p305-315`):
+
+**(a) TOC page selection kept only the single largest contiguous run of
+scoring pages**, discarding any other run outright - a single low-scoring
+divider page splitting one real TOC into two runs meant losing every
+chapter/section listed on the smaller half. Fixed in
+`extractors/toc_detector.py` (`detect_toc_pages`) by absorbing nearby runs
+into the main one (within `config.TOC_MERGE_GAP`) instead of dropping them.
+
+**(b) The "Contents" scoring bonus matched anywhere in a page's prose**
+(`CONTENTS_HEADER_RE.search()` over the whole page), not just a real page
+heading - "the contents of this section..." on an ordinary body page scored
+the same as an actual Contents page, drowning out the signal. Fixed by only
+crediting the bonus when a short (<=40 char) line near the top of the page
+is essentially just that heading.
+
+**(c) A bullet/marker glyph printed before numbered subsections extracts as
+a stray junk character** (e.g. `"# 2.8 Impact Loading"`), which sat in
+front of the numbering token and defeated the label regex (anchored at line
+start) - the entry then had no label, defaulted to chapter-level, and was
+misfiled as a brand-new top-level "chapter" with a garbled title instead of
+the real chapter's own numbered subsection. Fixed in
+`extractors/toc_parser.py` by stripping a single such glyph when it's
+immediately followed by a digit. The same fix added recognition of
+letter-prefixed subsection numbering (`A.1`, `B.2`, ...) used by appendices,
+which previously suffered the identical fate.
+
+**(d) A book's own chapter-title text, listed verbatim in its TOC entry,
+could be found by the anchor-page search and mistaken for the chapter's
+real starting page** - the search window around the first chapter's guessed
+page routinely overlaps the TOC pages themselves, where that same title
+string legitimately also appears. Fixed in `extractors/page_mapper.py`
+(`_find_anchor_page`) by excluding the known TOC pages from anchor
+candidacy.
+
+**(e) A page number glued directly to a preceding letter** (appendix-style
+`"...Absolute Values A1"`) was read as plain page 1, corrupting both the
+page number and leaving a stray letter stuck to the title, which then threw
+off page ordering for everything built from that entry onward. Fixed in
+`extractors/toc_parser.py` by requiring whitespace (or line start) before a
+trailing page-number match, not a bare letter.
+
+**(f) Every module was queried twice** - once using the unit title itself as
+a coarse "topic," and once per real topic - so a module whose topic text
+closely echoed its own title produced two rows with near-identical coverage
+against the same book chapter. Fixed in `matcher/recommendation_ranker.py`
+by only falling back to the coarse unit-title query when a module has no
+parsed topics at all.
+
+**Also relabeled** the `coverage_%` column to `match_confidence_%`
+(`exporter/excel_exporter.py`) - the score is a weighted similarity
+heuristic (semantic + keyword + fuzzy + metadata), not a verified
+measurement of how much of a topic's content a book actually contains, and
+the old name invited reading it as the latter.
+
+Regression-checked against 10 other books spanning calculus, thermodynamics,
+databases, AI, electronics, materials science, mathematics, robotics,
+mechanisms, and physics texts - no crashes, and chapter/section counts moved
+in the correct direction (fewer spurious fragmented "chapters") everywhere
+text was extractable. Three sampled books turned out to be scanned
+image-only PDFs with no extractable text anywhere in the document (not a
+code defect - see Known Limitations).
 
 ### Patch 2: zero recommendation rows / wrong topic matches
 
@@ -194,6 +268,23 @@ how the semantic score is produced.
 - **Font-based heading fallback** (`extractors/heading_detector.py`) is
   intentionally simple (font-size + numbering-pattern heuristics) since it
   only fires when a book has no usable TOC at all.
+- **Scanned/image-only PDFs produce zero chapters and are silently dropped.**
+  If a book PDF has no extractable text layer anywhere (a photographed/
+  scanned copy with no OCR), both TOC parsing and the font-based fallback
+  have nothing to work with, so `load_book` returns zero chapters and the
+  book never appears in recommendations. There's no warning surfaced beyond
+  the log line - check `book_records = [b for b in book_records if
+  b.chapters]` in `syllabus_book_mapper.py` if a book you expect to see
+  results for is silently missing. Fixing this requires adding an OCR step
+  (e.g. `pytesseract`), which this project does not currently do.
+- **Unnumbered TOC entries between numbered sections** (e.g. a "Problems",
+  "Review", or "Applied Project" heading with no chapter/section number)
+  are filed as their own top-level chapter rather than nested under the
+  section they actually belong to, since plain-text TOC extraction has no
+  indentation information to tell they're subordinate. In practice this
+  mostly just adds a few generic, low-signal corpus entries (they rarely
+  win a real topic match) rather than corrupting real chapters' page
+  ranges.
 - **Syllabus layouts that separate a course's code/title from its own unit
   content** (e.g. code/title only ever appear in a semester summary table,
   never paired with that course's "UNIT I..." content on the same or a

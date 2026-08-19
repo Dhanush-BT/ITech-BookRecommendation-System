@@ -122,7 +122,16 @@ def generate_recommendations(courses: List[SyllabusCourse],
     topic_count = 0
     for course in courses:
         for module in course.modules:
-            targets = [("", module.unit_title)] + [(module.unit_title, t) for t in module.topics]
+            # Query the granular topics when we have them; only fall back to
+            # the coarse unit title itself when no topics were parsed for
+            # this module. Querying both (as before) routinely produced two
+            # near-duplicate rows - the unit-title query and a topic query -
+            # landing on the same book chunk with near-identical coverage
+            # whenever a module's topic text closely echoes its own title.
+            if module.topics:
+                targets = [(module.unit_title, t) for t in module.topics]
+            else:
+                targets = [("", module.unit_title)]
             for parent_topic, topic_text in targets:
                 topic_count += 1
                 ranked = rank_books_for_topic(

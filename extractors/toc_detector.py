@@ -22,7 +22,13 @@ def _score_page(text: str) -> int:
     if not lines:
         return 0
 
-    if CONTENTS_HEADER_RE.search(text):
+    # Only credit the heading bonus when "Contents"/"Index" is essentially
+    # its OWN short line (a real page heading), not merely present anywhere
+    # in the page's prose - searching the whole page text previously made
+    # this fire on almost any page (e.g. "...the contents of this section
+    # depend on...", a running header mentioning "Index"), which defeated
+    # its purpose as a distinguishing signal for real TOC/front-matter pages.
+    if any(CONTENTS_HEADER_RE.search(l) and len(l.strip()) <= 40 for l in lines[:6]):
         score += 40
 
     lines_with_trailing_num = sum(1 for l in lines if TRAILING_NUM_RE.search(l.strip()))
@@ -61,8 +67,8 @@ def detect_toc_pages(doc: PDFDocument) -> List[int]:
         log("No TOC pages found by scoring heuristic.", "WARN")
         return []
 
-    # Keep the largest contiguous (allowing small gaps) run of candidate pages -
-    # a real TOC is a block, not scattered single hits.
+    # Group into contiguous (allowing small gaps) runs - a real TOC is a
+    # block, not scattered single hits.
     candidates.sort()
     runs: List[List[int]] = [[candidates[0]]]
     for pn in candidates[1:]:
@@ -70,6 +76,23 @@ def detect_toc_pages(doc: PDFDocument) -> List[int]:
             runs[-1].append(pn)
         else:
             runs.append([pn])
+
+    # A single low-scoring divider page (title page, "Contents in Brief",
+    # a part-opener with almost no text) can split one real TOC into two
+    # runs. Anchor on the largest run, then absorb any other run that sits
+    # close enough to it - including the low-scoring pages in the gap
+    # itself - rather than silently dropping that run's entries (which
+    # previously meant losing every chapter/section listed on it).
     best_run = max(runs, key=len)
-    log(f"Selected TOC pages: {best_run}")
-    return best_run
+    merged = set(best_run)
+    for run in runs:
+        if run is best_run:
+            continue
+        gap_before = best_run[0] - run[-1]
+        gap_after = run[0] - best_run[-1]
+        if 0 < gap_before <= config.TOC_MERGE_GAP or 0 < gap_after <= config.TOC_MERGE_GAP:
+            merged.update(range(min(run[0], best_run[0]), max(run[-1], best_run[-1]) + 1))
+
+    result = sorted(merged)
+    log(f"Selected TOC pages: {result}")
+    return result

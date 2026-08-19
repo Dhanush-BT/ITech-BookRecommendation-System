@@ -42,12 +42,20 @@ def _normalized_page_cache(doc: PDFDocument) -> Dict[int, str]:
     return get
 
 
-def _find_anchor_page(get_norm_text, prefix: str, guess: int, max_page: int) -> Optional[int]:
+def _find_anchor_page(get_norm_text, prefix: str, guess: int, max_page: int,
+                       exclude_pages: frozenset = frozenset()) -> Optional[int]:
     window = INITIAL_WINDOW
     while window <= MAX_WINDOW:
         lo = max(1, guess - window)
         hi = min(max_page, guess + window)
-        candidates = [pn for pn in range(lo, hi + 1) if prefix in get_norm_text(pn)]
+        # The TOC page(s) themselves are excluded from candidacy: a
+        # chapter's title text also appears verbatim in its own TOC entry,
+        # so without this exclusion the search can "confirm" the anchor
+        # against the TOC listing itself rather than the real chapter start
+        # - especially likely for early chapters, whose search window
+        # naturally overlaps the TOC pages.
+        candidates = [pn for pn in range(lo, hi + 1)
+                      if pn not in exclude_pages and prefix in get_norm_text(pn)]
         if candidates:
             return min(candidates, key=lambda p: abs(p - guess))
         window *= WINDOW_GROWTH
@@ -65,6 +73,7 @@ def resolve_page_offsets(doc: PDFDocument, entries: List[TOCEntry], toc_pages: L
     running_offset = last_toc_page  # first guess: content starts right after TOC
     resolved: List[TOCEntry] = []
     get_norm_text = _normalized_page_cache(doc)
+    exclude_pages = frozenset(toc_pages)
     anchors_confirmed = 0
     anchors_rejected = 0
 
@@ -76,7 +85,8 @@ def resolve_page_offsets(doc: PDFDocument, entries: List[TOCEntry], toc_pages: L
         if is_anchor_candidate:
             prefix = normalize_text(entry.title)[:ANCHOR_PREFIX_LEN]
             if len(prefix) >= MIN_ANCHOR_PREFIX_LEN:
-                candidate_page = _find_anchor_page(get_norm_text, prefix, guess, doc.num_pages)
+                candidate_page = _find_anchor_page(get_norm_text, prefix, guess, doc.num_pages,
+                                                    exclude_pages=exclude_pages)
                 if candidate_page is not None:
                     implied_offset = candidate_page - entry.page
                     if abs(implied_offset - running_offset) <= MAX_OFFSET_JUMP:
