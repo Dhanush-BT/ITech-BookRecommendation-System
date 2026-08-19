@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Copyrighted textbook PDFs / syllabus PDFs - not tracked (size + copyright)
+books/*.pdf
+syllabi/*.pdf
+
+# Generated outputs
+output/
+out.xls
