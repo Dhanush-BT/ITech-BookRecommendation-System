@@ -3,6 +3,7 @@ Writes the final recommendation rows to an .xlsx file using the exact
 column schema from the design spec (Phase 12), one row per
 (syllabus topic x recommended book).
 """
+import re
 from typing import List
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -10,6 +11,23 @@ from openpyxl.utils import get_column_letter
 
 from matcher.recommendation_ranker import RecommendationRow
 from utils.logger import log
+
+# XML (and so .xlsx) forbids most ASCII control characters. A book with a
+# corrupted font/encoding table (e.g. metadata_extractor misreading a
+# garbled author string) can hand us one of these in an otherwise-fine
+# string, which previously crashed the entire export - discarding every
+# other already-computed row - deep into Phase 12. Stripped, not replaced,
+# since these characters carry no legible content anyway.
+_ILLEGAL_XML_CHARS_RE = re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f\ud800-\udfff￾￿]"
+)
+
+
+def _sanitize(value):
+    if isinstance(value, str):
+        return _ILLEGAL_XML_CHARS_RE.sub("", value)
+    return value
+
 
 COLUMNS = [
     ("id", 6),
@@ -75,7 +93,7 @@ def export_to_excel(rows: List[RecommendationRow], output_path: str):
         ]
         excel_row = i + 1
         for col_idx, value in enumerate(values, start=1):
-            cell = ws.cell(row=excel_row, column=col_idx, value=value)
+            cell = ws.cell(row=excel_row, column=col_idx, value=_sanitize(value))
             cell.font = BODY_FONT
             cell.border = THIN_BORDER
             col_name = COLUMNS[col_idx - 1][0]
