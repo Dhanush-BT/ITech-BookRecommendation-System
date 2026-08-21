@@ -1,15 +1,19 @@
+"""Timestamped console logger."""
 import sys
 import time
 
-_START = time.time()
+import config
 
 
-def log(msg: str, level: str = "INFO"):
-    elapsed = time.time() - _START
-    print(f"[{elapsed:7.2f}s] [{level}] {msg}", file=sys.stdout, flush=True)
+def log(message: str) -> None:
+    if not config.LOG_VERBOSE:
+        return
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {message}", file=sys.stderr)
 
 
-def section(title: str):
-    log("=" * 60)
-    log(title.upper())
-    log("=" * 60)
+def section(title: str) -> None:
+    if not config.LOG_VERBOSE:
+        return
+    bar = "=" * max(8, len(title))
+    print(f"\n{bar}\n{title}\n{bar}", file=sys.stderr)

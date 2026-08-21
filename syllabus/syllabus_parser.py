@@ -1,52 +1,62 @@
-"""
-Parses a university syllabus PDF (Anna University style: course code,
-course title, L-T-P-C, UNIT I..V with topic lists, references) into a
-structured list of SyllabusCourse objects, each holding SyllabusModule
-(unit) entries with a flat topic list.
+"""Parses an Anna-University-style syllabus PDF (covering an entire degree
+curriculum) into per-subject SyllabusCourse structures: units/topics plus the
+subject's own TEXT BOOKS / REFERENCE BOOKS citation lists.
 
-Designed against the real syllabus documents in this project (Anna
-University M.Tech / B.Tech regulation books), but written defensively so
-that odd formatting (missing spaces, wrapped headers, stray page numbers)
-degrades gracefully instead of crashing the whole run.
+Format observed in this corpus (confirmed by direct inspection of
+syllabi/B.E.Mech.pdf): each subject gets a detailed section shaped like
+
+    <CODE> <SUBJECT NAME>              L T P C
+                                        3 0 0 3
+    COURSE OBJECTIVES: ...
+    UNIT – I <UNIT TITLE>              9
+    <topic> – <topic> – <topic> – ...
+    UNIT – II <UNIT TITLE>             9
+    ...
+    TOTAL: 45 PERIODS
+    OUTCOMES: ...
+    TEXT BOOKS:
+    1. <citation>
+    2. <citation>
+    REFERENCE BOOKS:
+    1. <citation>
+    ...
+
+Citation formatting varies by department (author-first vs title-first), so
+this parser deliberately does NOT try to split citations into strict
+author/title/publisher fields — it keeps the raw line and leaves matching
+to fuzzy string comparison downstream (matcher/reference_resolver.py).
 """
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Iterator, List, Optional, Tuple
 
-from extractors.pdf_reader import PDFDocument
-from indexing.text_cleaner import clean_text
-from utils.regex_patterns import COURSE_CODE_RE
-from utils.roman import normalize_unit_number
+import pypdf
+
 from utils.logger import log
-
-# "MA4154 ADVANCED NUMERICAL METHODS L T P C"  (L T P C header sometimes on same/next line)
-COURSE_HEADER_RE = re.compile(
-    r"^\s*([A-Z]{2,4}\d{3,4})\s+([A-Z][A-Z0-9&,.:'\-/ ]{3,80}?)\s*(?:L\s*T\s*P\s*C)?\s*$"
+from utils.regex_patterns import (
+    COURSE_CODE_RE,
+    NUMBERED_ENTRY_RE,
+    REFERENCE_HEADER_RE,
+    SECTION_END_HEADER_RE,
+    TEXTBOOK_HEADER_RE,
+    UNIT_HEADER_RE,
 )
+from utils.roman import parse_unit_number
 
-# "UNIT I ALGEBRAIC EQUATIONS 12"  /  "UNITIII FINITE DIFFERENCE METHOD ... 12" (wrapped, no trailing hrs)
-UNIT_HEADER_RE = re.compile(
-    r"^\s*UNIT\s*[-]?\s*([IVXLCDM0-9]+)\s+(.*?)\s*(\d{1,3})?\s*$",
-    re.IGNORECASE,
-)
-# Catches the "UNITIII ..." collapsed-space case
-UNIT_HEADER_NOSPACE_RE = re.compile(
-    r"^\s*UNIT([IVXLCDM0-9]+)\s+(.*?)\s*(\d{1,3})?\s*$",
-    re.IGNORECASE,
-)
+_OBJECTIVES_RE = re.compile(r"OBJECTIVES?\s*:", re.IGNORECASE)
+_TRAILING_HOURS_RE = re.compile(r"\s+\d{1,3}\s*$")
+_TOPIC_SPLIT_RE = re.compile(r"\s+[–—-]\s+")
 
-STOP_SECTION_RE = re.compile(
-    r"^\s*(TOTAL\s*[:\-]?\s*\d*\s*PERIODS?|COURSE\s+OUTCOMES?|REFERENCES?|"
-    r"COURSE\s+ARTICULATION|SUGGESTED)\b", re.IGNORECASE
-)
-SKIP_SECTION_RE = re.compile(r"^\s*COURSE\s+OBJECTIVES?\s*:?\s*$", re.IGNORECASE)
 
-TOPIC_SPLIT_RE = re.compile(r"\s[–\-]\s|\s*\n\s*")
+@dataclass
+class CitedBook:
+    raw_line: str
+    citation_type: str  # "textbook" | "reference"
 
 
 @dataclass
 class SyllabusModule:
-    unit_label: str          # "I", "II", ... or raw token
+    unit_label: str
     unit_number: Optional[int]
     unit_title: str
     topics: List[str] = field(default_factory=list)
@@ -58,110 +68,138 @@ class SyllabusCourse:
     code: str
     name: str
     modules: List[SyllabusModule] = field(default_factory=list)
+    cited_books: List[CitedBook] = field(default_factory=list)
     source_file: str = ""
 
-    def all_topics(self):
-        """Yield (module, topic_text) for every topic across every unit,
-        plus the unit title itself as a coarse-grained topic."""
-        for m in self.modules:
-            yield m, m.unit_title
-            for t in m.topics:
-                yield m, t
+    def all_topics(self) -> Iterator[Tuple[SyllabusModule, str]]:
+        for module in self.modules:
+            if module.topics:
+                for topic in module.topics:
+                    yield module, topic
+            else:
+                yield module, module.unit_title
 
 
-def _split_topics(body: str) -> List[str]:
-    body = body.replace("\u2013", "-").replace("\u2014", "-")
-    raw_parts = re.split(r"\s-\s|\n", body)
-    topics = []
-    for part in raw_parts:
-        part = part.strip(" :.-")
-        if len(part) < 3:
+def _extract_full_text(path: str) -> str:
+    reader = pypdf.PdfReader(path, strict=False)
+    pages = []
+    for page in reader.pages:
+        try:
+            pages.append(page.extract_text() or "")
+        except Exception:
+            pages.append("")
+    return "\n".join(pages)
+
+
+def _find_course_starts(text: str) -> List[Tuple[int, str, str]]:
+    """Locate detailed course-syllabus section headers (not curriculum-table rows)."""
+    starts = []
+    seen_codes = set()
+    for match in COURSE_CODE_RE.finditer(text):
+        code = match.group(1)
+        idx = match.start()
+        window = text[idx: idx + 500]
+        obj_match = _OBJECTIVES_RE.search(window)
+        if not obj_match or obj_match.start() > 450:
             continue
-        # further split comma-separated clauses only if the clause is long
-        # (keeps short acronym lists like "IVPs, BVP" intact)
-        topics.append(part)
-    return topics
+        if code in seen_codes:
+            continue
+        # course name: rest of the header line(s) up to "L T P C" or the first blank line
+        after_code = text[match.end(): idx + 300]
+        header_end = re.search(r"L\s*T\s*P\s*C|\n\s*\n", after_code)
+        name_region = after_code[: header_end.start()] if header_end else after_code[:80]
+        name = re.sub(r"\s+", " ", name_region).strip(" -:–")
+        if not name:
+            name = code
+        starts.append((idx, code, name))
+        seen_codes.add(code)
+    return starts
 
 
-def _match_unit_header(line: str):
-    m = UNIT_HEADER_RE.match(line)
-    if not m:
-        m = UNIT_HEADER_NOSPACE_RE.match(line)
-    return m
+def _parse_units(block: str) -> List[SyllabusModule]:
+    unit_matches = list(UNIT_HEADER_RE.finditer(block))
+    modules = []
+    for i, m in enumerate(unit_matches):
+        unit_label = f"UNIT {m.group(1)}"
+        unit_number = parse_unit_number(unit_label)
+        rest_of_line = m.group(2).strip()
+
+        body_start = m.end()
+        body_end = unit_matches[i + 1].start() if i + 1 < len(unit_matches) else len(block)
+        body = block[body_start:body_end]
+
+        end_marker = SECTION_END_HEADER_RE.search(body)
+        if end_marker:
+            body = body[: end_marker.start()]
+
+        # unit title is often on the header line, possibly with trailing hour count
+        title_line = _TRAILING_HOURS_RE.sub("", rest_of_line).strip(" -:–")
+        body_norm = re.sub(r"\s+", " ", body).strip()
+
+        if not title_line and body_norm:
+            # title wrapped onto the next line before the topic dashes start
+            first_dash = body_norm.find("–")
+            if first_dash == -1:
+                first_dash = body_norm.find(" - ")
+            title_line = body_norm[: first_dash if first_dash > 0 else len(body_norm)].strip()
+            body_norm = body_norm[len(title_line):].strip(" -:–")
+
+        topics = [t.strip(" .") for t in _TOPIC_SPLIT_RE.split(body_norm) if t.strip(" .")]
+        # drop a pure-numeric leftover ("9" hour count) if it slipped into the split
+        topics = [t for t in topics if not re.fullmatch(r"\d{1,3}", t)]
+
+        modules.append(
+            SyllabusModule(
+                unit_label=unit_label,
+                unit_number=unit_number,
+                unit_title=title_line or unit_label,
+                topics=topics,
+                raw_text=body_norm,
+            )
+        )
+    return modules
+
+
+def _parse_cited_books(block: str) -> List[CitedBook]:
+    cited: List[CitedBook] = []
+    for header_re, citation_type in ((TEXTBOOK_HEADER_RE, "textbook"), (REFERENCE_HEADER_RE, "reference")):
+        header_match = header_re.search(block)
+        if not header_match:
+            continue
+        section_start = header_match.end()
+        end_marker = SECTION_END_HEADER_RE.search(block, pos=section_start)
+        section_end = end_marker.start() if end_marker else len(block)
+        section = block[section_start:section_end]
+
+        entries = list(NUMBERED_ENTRY_RE.finditer(section))
+        for i, m in enumerate(entries):
+            entry_start = m.start()
+            entry_end = entries[i + 1].start() if i + 1 < len(entries) else len(section)
+            raw_full = re.sub(r"\s+", " ", section[entry_start:entry_end]).strip()
+            raw = re.sub(r"^\d{1,2}[\.\)]\s*", "", raw_full)
+            if raw:
+                cited.append(CitedBook(raw_line=raw, citation_type=citation_type))
+    return cited
 
 
 def parse_syllabus_pdf(path: str) -> List[SyllabusCourse]:
-    doc = PDFDocument(path)
-    courses: List[SyllabusCourse] = []
-    current_course: Optional[SyllabusCourse] = None
-    current_module: Optional[SyllabusModule] = None
-    in_objectives_block = False
-    module_buffer: List[str] = []
+    text = _extract_full_text(path)
+    starts = _find_course_starts(text)
+    log(f"syllabus_parser: found {len(starts)} subject sections in {path}")
 
-    def flush_module():
-        nonlocal current_module, module_buffer
-        if current_module is not None:
-            body = "\n".join(module_buffer).strip()
-            current_module.raw_text = body
-            current_module.topics = _split_topics(body)
-            if current_course is not None:
-                current_course.modules.append(current_module)
-        current_module = None
-        module_buffer = []
-
-    total_pages = doc.num_pages
-    for page in doc.get_pages(1, total_pages):
-        text = clean_text(page.text) if False else page.text  # keep raw layout; clean per-line below
-        for raw_line in text.split("\n"):
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            # New course header (only trust it if it contains a real course code)
-            code_match = COURSE_CODE_RE.search(line)
-            header_match = COURSE_HEADER_RE.match(line)
-            if code_match and header_match and header_match.group(1) == code_match.group(0):
-                flush_module()
-                code = header_match.group(1)
-                name = header_match.group(2).strip().rstrip("LTPC ").strip()
-                if len(name) >= 3:
-                    current_course = SyllabusCourse(code=code, name=name, source_file=path)
-                    courses.append(current_course)
-                    in_objectives_block = False
-                    continue
-
-            if current_course is None:
-                continue  # front-matter / regulations pages before first course
-
-            if SKIP_SECTION_RE.match(line):
-                in_objectives_block = True
-                continue
-
-            unit_match = _match_unit_header(line)
-            if unit_match:
-                flush_module()
-                in_objectives_block = False
-                label = unit_match.group(1).strip().rstrip(".")
-                title = (unit_match.group(2) or "").strip(" :.-")
-                current_module = SyllabusModule(
-                    unit_label=label,
-                    unit_number=normalize_unit_number(label),
-                    unit_title=title if title else "(untitled unit)",
-                )
-                continue
-
-            if STOP_SECTION_RE.match(line):
-                flush_module()
-                in_objectives_block = True
-                continue
-
-            if in_objectives_block:
-                continue
-
-            if current_module is not None:
-                module_buffer.append(line)
-
-    flush_module()
-    log(f"Parsed {len(courses)} course(s) with "
-        f"{sum(len(c.modules) for c in courses)} total units from {path}")
+    courses = []
+    for i, (idx, code, name) in enumerate(starts):
+        block_end = starts[i + 1][0] if i + 1 < len(starts) else len(text)
+        block = text[idx:block_end]
+        modules = _parse_units(block)
+        cited_books = _parse_cited_books(block)
+        courses.append(
+            SyllabusCourse(
+                code=code,
+                name=name,
+                modules=modules,
+                cited_books=cited_books,
+                source_file=path,
+            )
+        )
     return courses

@@ -1,22 +1,19 @@
-"""
-Orchestrates the per-book extraction pipeline (Phases 2-7 of the design):
-  Book PDF -> metadata -> TOC detection -> TOC parsing -> page offset
-  resolution -> chapter/section tree -> (fallback to font-based heading
-  detection if no usable TOC was found).
-"""
+"""Orchestrates the per-book extraction pipeline: metadata -> TOC detect/parse
+-> page-offset resolution -> chapter/section tree, falling back to font-based
+heading detection when the TOC is missing or too sparse."""
+import os
 from dataclasses import dataclass, field
 from typing import List
-import os
 
-from extractors.pdf_reader import PDFDocument, get_document
-from extractors.metadata_extractor import extract_metadata, BookMetadata
-from extractors.toc_detector import detect_toc_pages
-from extractors.toc_parser import parse_toc, TOCEntry
-from extractors.page_mapper import resolve_page_offsets
-from extractors.chapter_builder import build_chapters, Chapter
-from extractors.heading_detector import detect_headings_by_font
 import config
-from utils.logger import log, section
+from extractors.chapter_builder import Chapter, build_chapters
+from extractors.heading_detector import detect_headings_by_font
+from extractors.metadata_extractor import BookMetadata, extract_metadata
+from extractors.page_mapper import resolve_page_offsets
+from extractors.toc_detector import detect_toc_pages
+from extractors.toc_parser import parse_toc
+from pdfcore.pdf_reader import PDFDocument, get_document
+from utils.logger import log
 
 
 @dataclass
@@ -29,29 +26,53 @@ class BookRecord:
     doc: PDFDocument = None
 
 
+def _book_key(path: str) -> str:
+    return os.path.splitext(os.path.basename(path))[0]
+
+
 def load_book(path: str) -> BookRecord:
-    section(f"Loading book: {os.path.basename(path)}")
-    key = os.path.splitext(os.path.basename(path))[0]
-
     doc = get_document(path)
-    log(f"Pages: {doc.num_pages}")
+    key = _book_key(path)
+    metadata = extract_metadata(path, doc)
 
-    metadata = extract_metadata(path)
-
-    toc_pages = detect_toc_pages(doc)
-    entries: List[TOCEntry] = parse_toc(doc, toc_pages) if toc_pages else []
-
+    chapters: List[Chapter] = []
     used_fallback = False
-    if len(entries) < 3 and config.USE_HEADING_FALLBACK:
-        log("TOC missing or too sparse - falling back to font/heading detection.", "WARN")
-        entries = detect_headings_by_font(doc, start_page=1, end_page=min(doc.num_pages, 40))
-        used_fallback = True
 
-    resolved = resolve_page_offsets(doc, entries, toc_pages) if toc_pages else entries
-    chapters = build_chapters(doc, resolved)
+    toc_range = detect_toc_pages(doc)
+    toc_entries = parse_toc(doc, *toc_range) if toc_range else []
 
-    record = BookRecord(key=key, path=path, metadata=metadata, chapters=chapters,
-                         used_fallback_headings=used_fallback, doc=doc)
-    log(f"Book '{key}' ready: {len(chapters)} chapters, "
-        f"{sum(len(c.sections) for c in chapters)} sections, fallback={used_fallback}")
-    return record
+    if len(toc_entries) >= config.MIN_TOC_ENTRIES:
+        resolved, _offset = resolve_page_offsets(doc, toc_entries)
+        chapters = build_chapters(doc, resolved)
+
+    if not chapters and config.USE_HEADING_FALLBACK:
+        heading_resolved = detect_headings_by_font(doc, path)
+        if heading_resolved:
+            chapters = build_chapters(doc, heading_resolved)
+            used_fallback = True
+
+    if not chapters:
+        log(f"WARNING: no chapter structure found for {key} (num_pages={doc.num_pages})")
+
+    return BookRecord(
+        key=key,
+        path=path,
+        metadata=metadata,
+        chapters=chapters,
+        used_fallback_headings=used_fallback,
+        doc=doc,
+    )
+
+
+def load_books(books_dir: str = config.BOOKS_DIR) -> List[BookRecord]:
+    records = []
+    paths = sorted(
+        os.path.join(books_dir, f) for f in os.listdir(books_dir) if f.lower().endswith(".pdf")
+    )
+    for i, path in enumerate(paths, 1):
+        log(f"[{i}/{len(paths)}] loading {os.path.basename(path)} ...")
+        try:
+            records.append(load_book(path))
+        except Exception as exc:
+            log(f"WARNING: failed to load {path}: {exc}")
+    return records

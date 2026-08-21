@@ -1,9 +1,18 @@
-"""Wraps the TF-IDF vector index to answer 'how similar is this syllabus
-topic to each indexed book chunk' (see indexing/embedding_builder.py for
-why TF-IDF is used in place of a downloaded sentence-embedding model)."""
-from typing import List
+"""Wraps EmbeddingModel + EmbeddingIndex: embeds a topic query, gets each
+chunk's raw max-cosine score, and rescales it onto the 0-1 axis coverage
+scoring expects."""
+from typing import Dict
+
+from indexing.embedding_model import EmbeddingModel
 from indexing.vector_index import EmbeddingIndex
+from matcher.coverage_calculator import rescale_semantic
 
 
-def semantic_scores(index: EmbeddingIndex, topic_text: str) -> List[float]:
-    return index.query(topic_text)
+def semantic_scores_raw(topic_text: str, index: EmbeddingIndex, model: EmbeddingModel) -> Dict[str, float]:
+    qvec = model.encode_query(topic_text)
+    return index.query(qvec)
+
+
+def semantic_scores(topic_text: str, index: EmbeddingIndex, model: EmbeddingModel) -> Dict[str, float]:
+    raw = semantic_scores_raw(topic_text, index, model)
+    return {chunk_id: rescale_semantic(score) for chunk_id, score in raw.items()}

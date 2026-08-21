@@ -1,70 +1,86 @@
-"""
-Fallback chapter/section detection for books whose TOC couldn't be parsed
-(scanned books, missing TOC, non-standard layout). Detects headings using
-font size, boldness, and numbering patterns instead of a printed TOC.
-"""
+"""Font-size/boldness-based heading detector, used only when a book has no
+usable TOC (missing or fewer than MIN_TOC_ENTRIES entries). Scans page text
+with pdfplumber's char-level font metadata to find short, large/bold lines
+near the top of a page as chapter/section heading candidates."""
+import statistics
 from typing import List
+
 import pdfplumber
 
-from extractors.pdf_reader import PDFDocument
+import config
+from extractors.page_mapper import ResolvedTOCEntry
 from extractors.toc_parser import TOCEntry
-from utils.regex_patterns import CHAPTER_WORD_RE, NUMBERING_RE
+from pdfcore.pdf_reader import PDFDocument
 from utils.logger import log
 
-MIN_HEADING_LEN = 3
-MAX_HEADING_LEN = 90
+_LEVEL1_SIZE_RATIO = 1.6
+_LEVEL2_SIZE_RATIO = 1.3
+_MAX_HEADING_CHARS = 90
+_TOP_LINES_CONSIDERED = 4
 
 
-def _page_font_stats(page):
-    sizes = [c["size"] for c in page.chars if c.get("size")]
-    if not sizes:
-        return 0.0
-    sizes.sort()
-    return sizes[len(sizes) // 2]  # median
+def _line_groups(chars):
+    """Group pdfplumber chars into lines by rounded 'top' position, in reading order."""
+    lines = {}
+    for ch in chars:
+        top = round(ch["top"], 0)
+        lines.setdefault(top, []).append(ch)
+    ordered_tops = sorted(lines.keys())
+    result = []
+    for top in ordered_tops:
+        line_chars = sorted(lines[top], key=lambda c: c["x0"])
+        text = "".join(c["text"] for c in line_chars).strip()
+        sizes = [c["size"] for c in line_chars if c.get("size")]
+        avg_size = statistics.mean(sizes) if sizes else 0.0
+        result.append((text, avg_size))
+    return result
 
 
-def _line_avg_size(page, line_text: str, all_lines_words):
-    # pdfplumber doesn't give us text->char mapping directly per extracted line,
-    # so we approximate using extract_words() sizes for words that appear in the line.
-    matches = [w for w in all_lines_words if w["text"] and w["text"] in line_text]
-    if not matches:
-        return 0.0
-    return sum(w["size"] for w in matches) / len(matches)
-
-
-def detect_headings_by_font(doc: PDFDocument, start_page: int = 1,
-                             end_page: int = None) -> List[TOCEntry]:
-    end_page = end_page or doc.num_pages
-    entries: List[TOCEntry] = []
-
-    try:
-        with pdfplumber.open(doc.path) as pdf:
-            for pn in range(start_page, min(end_page, len(pdf.pages)) + 1):
-                page = pdf.pages[pn - 1]
-                median_size = _page_font_stats(page)
-                if median_size == 0:
-                    continue
-                try:
-                    words = page.extract_words(extra_attrs=["size"])
-                except Exception:
-                    continue
-
-                text_lines = [l for l in (page.extract_text() or "").split("\n") if l.strip()]
-                for line in text_lines:
-                    stripped = line.strip()
-                    if not (MIN_HEADING_LEN <= len(stripped) <= MAX_HEADING_LEN):
-                        continue
-                    looks_structural = bool(CHAPTER_WORD_RE.match(stripped) or NUMBERING_RE.match(stripped))
-                    avg_size = _line_avg_size(page, stripped, words)
-                    is_large = avg_size >= median_size * 1.15 if avg_size else False
-                    if looks_structural or is_large:
-                        level = 1 if CHAPTER_WORD_RE.match(stripped) else 2
-                        entries.append(TOCEntry(raw_line=stripped, label="", title=stripped,
-                                                 page=pn, level=level))
-    except Exception as e:
-        log(f"Heading-fallback detection failed for {doc.path}: {e}", "WARN")
+def detect_headings_by_font(doc: PDFDocument, path: str) -> List[ResolvedTOCEntry]:
+    scan_limit = min(config.MAX_HEADING_SCAN_PAGES, doc.num_pages)
+    if scan_limit == 0:
         return []
 
-    log(f"Font/heading fallback found {len(entries)} candidate headings "
-        f"between pages {start_page}-{end_page}")
-    return entries
+    try:
+        pdf = pdfplumber.open(path)
+    except Exception as exc:
+        log(f"WARNING: heading_detector could not open {path} with pdfplumber: {exc}")
+        return []
+
+    all_sizes = []
+    page_lines = []
+    try:
+        for i in range(scan_limit):
+            try:
+                page = pdf.pages[i]
+                lines = _line_groups(page.chars)
+            except Exception:
+                lines = []
+            page_lines.append(lines)
+            all_sizes.extend(sz for _, sz in lines if sz > 0)
+    finally:
+        pdf.close()
+
+    if not all_sizes:
+        return []
+
+    median_size = statistics.median(all_sizes)
+    if median_size <= 0:
+        return []
+
+    results: List[ResolvedTOCEntry] = []
+    for page_index, lines in enumerate(page_lines):
+        for line_idx, (text, size) in enumerate(lines[:_TOP_LINES_CONSIDERED]):
+            if not text or len(text) > _MAX_HEADING_CHARS or size <= 0:
+                continue
+            ratio = size / median_size
+            if ratio >= _LEVEL1_SIZE_RATIO:
+                level = 1
+            elif ratio >= _LEVEL2_SIZE_RATIO:
+                level = 2
+            else:
+                continue
+            entry = TOCEntry(raw_line=text, label="", title=text, page=page_index + 1, level=level)
+            results.append(ResolvedTOCEntry(entry=entry, pdf_page=page_index))
+
+    return results

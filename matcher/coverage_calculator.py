@@ -1,33 +1,38 @@
-"""
-Combines the individual similarity signals (semantic / keyword / fuzzy /
-metadata) into the single 'Coverage %' figure the spreadsheet reports, using
-the weighted formula from the design spec:
-
-    Coverage = 0.45*Semantic + 0.25*Keyword + 0.20*Fuzzy + 0.10*Metadata
-
-(Weights are configurable in config.py; the design doc's own 5-term formula
-also included a standalone "Chapter similarity" term - since our chunks are
-already chapter/section-scoped, that signal is folded into Keyword+Fuzzy
-rather than duplicated as a separate weight.)
-"""
+"""Combines the semantic/keyword/fuzzy/metadata signals into a single 0-100
+coverage score, and rescales raw BGE cosine similarity onto a comparable 0-1
+confidence axis before it enters that combination."""
 import config
+from extractors.metadata_extractor import BookMetadata
+
+
+def rescale_semantic(raw_similarity: float) -> float:
+    floor, ceiling = config.SEMANTIC_SIM_FLOOR, config.SEMANTIC_SIM_CEILING
+    if ceiling <= floor:
+        return max(0.0, min(1.0, raw_similarity))
+    return max(0.0, min(1.0, (raw_similarity - floor) / (ceiling - floor)))
+
+
+def metadata_score(metadata: BookMetadata) -> float:
+    fields = [metadata.title, metadata.authors, metadata.edition, metadata.year]
+    present = sum(1 for f in fields if f)
+    return present / len(fields)
 
 
 def combine_scores(semantic: float, keyword: float, fuzzy: float, metadata: float) -> float:
     raw = (
-        config.WEIGHT_SEMANTIC * semantic +
-        config.WEIGHT_KEYWORD * keyword +
-        config.WEIGHT_FUZZY * fuzzy +
-        config.WEIGHT_METADATA * metadata
+        config.WEIGHT_SEMANTIC * semantic
+        + config.WEIGHT_KEYWORD * keyword
+        + config.WEIGHT_FUZZY * fuzzy
+        + config.WEIGHT_METADATA * metadata
     )
-    return max(0.0, min(1.0, raw)) * 100.0
+    return round(max(0.0, min(1.0, raw)) * 100, 1)
 
 
 def coverage_label(coverage_percent: float) -> str:
-    if coverage_percent >= 85:
+    if coverage_percent >= 90:
         return "Excellent"
-    if coverage_percent >= 65:
+    if coverage_percent >= 75:
         return "Good"
     if coverage_percent >= config.MIN_COVERAGE_PERCENT:
-        return "Partial"
+        return "Moderate"
     return "Weak"

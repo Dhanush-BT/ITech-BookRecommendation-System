@@ -1,25 +1,35 @@
-"""
-For every syllabus topic, scores every book chunk (chapter/section) using
-the semantic + keyword + fuzzy + metadata signals, keeps the best-matching
-chunk per book, ranks books by coverage, and returns the top N as
-RecommendationRow objects ready for the Excel exporter.
-"""
-from dataclasses import dataclass, field
-from typing import List, Dict
-import itertools
+"""Top-level matching orchestrator. For every syllabus topic, matching is
+scoped to only the subject's resolved cited books (strict scoping): textbook
+citations are tried first, reference citations only if no textbook clears the
+coverage threshold, and a topic with no qualifying match anywhere gets an
+explicit Not Found row rather than being silently dropped -- every syllabus
+topic must produce at least one output row."""
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
-from extractors.book_loader import BookRecord
-from extractors.pdf_reader import PDFDocument, get_document
-from indexing.chunk_generator import Chunk, generate_chunks
-from indexing.embedding_builder import build_index, EmbeddingIndex
-from matcher.semantic_matcher import semantic_scores
-from matcher.keyword_matcher import keyword_score
-from matcher.fuzzy_matcher import fuzzy_score
-from matcher.coverage_calculator import combine_scores, coverage_label
-from syllabus.syllabus_parser import SyllabusCourse, SyllabusModule
-from utils.regex_patterns import tokenize
-from utils.logger import log, section
+import numpy as np
+
 import config
+from extractors.book_loader import BookRecord
+from indexing.chunk_generator import Chunk, generate_chunks
+from indexing.embedding_cache import load_or_build_book_embeddings
+from indexing.embedding_model import EmbeddingModel
+from indexing.vector_index import EmbeddingIndex
+from matcher.coverage_calculator import combine_scores, coverage_label, metadata_score
+from matcher.fuzzy_matcher import fuzzy_score
+from matcher.keyword_matcher import keyword_score
+from matcher.reference_resolver import ResolvedReference, split_resolved_keys
+from matcher.semantic_matcher import semantic_scores
+from pdfcore.pdf_reader import PDFDocument
+from syllabus.syllabus_parser import SyllabusCourse, SyllabusModule
+from utils.logger import log
+
+
+@dataclass
+class BookCorpus:
+    record: BookRecord
+    doc: PDFDocument
+    chunks: List[Chunk]
 
 
 @dataclass
@@ -37,139 +47,193 @@ class RecommendationRow:
     year: str
     book_type: str
     chapter: str
-    page_start: int
-    page_end: int
+    page_start: Optional[int]
+    page_end: Optional[int]
     coverage_percent: float
-    notes: str
+    status: str  # "Found" | "Not Found"
+    notes: str = ""
 
 
-@dataclass
-class BookCorpus:
-    record: BookRecord
-    doc: PDFDocument
-    chunks: List[Chunk]
-
-
-def build_corpus(book_records: List[BookRecord]) -> List[BookCorpus]:
+def build_corpus(records: List[BookRecord]) -> List[BookCorpus]:
     corpus = []
-    for rec in book_records:
-        doc = rec.doc if rec.doc is not None else get_document(rec.path)
-        chunks = generate_chunks(doc, rec.chapters, rec.key)
-        if not chunks:
-            log(f"WARNING: book '{rec.key}' produced zero chunks - it will "
-                f"never be recommended. Check its TOC/heading extraction.", "WARN")
-        corpus.append(BookCorpus(record=rec, doc=doc, chunks=chunks))
+    for rec in records:
+        chunks = generate_chunks(rec.doc, rec.chapters, rec.key)
+        corpus.append(BookCorpus(record=rec, doc=rec.doc, chunks=chunks))
     return corpus
 
 
-def _metadata_bonus(topic_text: str, book_title: str) -> float:
-    topic_tokens = set(tokenize(topic_text))
-    title_tokens = set(tokenize(book_title))
-    if not topic_tokens or not title_tokens:
-        return 0.0
-    overlap = len(topic_tokens & title_tokens)
-    return min(overlap / max(len(topic_tokens), 1), 1.0)
+def build_indices_for_keys(
+    book_keys: List[str], corpus_by_key: Dict[str, BookCorpus], model: EmbeddingModel
+) -> Dict[str, EmbeddingIndex]:
+    """Lazily builds (or loads from cache) an EmbeddingIndex per book, only for
+    the books actually cited/resolved by some subject -- under strict scoping
+    there's no reason to embed books nothing will ever match against."""
+    indices: Dict[str, EmbeddingIndex] = {}
+    for i, key in enumerate(book_keys, 1):
+        bc = corpus_by_key.get(key)
+        if bc is None or not bc.chunks:
+            continue
+        log(f"[{i}/{len(book_keys)}] embedding {key} ({len(bc.chunks)} chunks) ...")
+        subchunks, vectors = load_or_build_book_embeddings(bc.record.path, key, bc.chunks, model)
+        if subchunks:
+            indices[key] = _index_from_encoded(subchunks, vectors)
+    return indices
 
 
-def _best_chunk_per_book(all_chunks: List[Chunk], sims: List[float]) -> Dict[str, tuple]:
-    """Returns {book_key: (chunk, semantic_score)} keeping only the single
-    highest-scoring chunk for each book."""
-    best: Dict[str, tuple] = {}
-    for chunk, sim in zip(all_chunks, sims):
-        current = best.get(chunk.book_key)
-        if current is None or sim > current[1]:
-            best[chunk.book_key] = (chunk, sim)
-    return best
+def _index_from_encoded(subchunks, vectors) -> EmbeddingIndex:
+    """Builds an EmbeddingIndex from already-encoded (possibly cache-loaded)
+    vectors, without re-encoding -- build_index() re-encodes from scratch, which
+    would defeat the embedding cache."""
+    sorted_pairs = sorted(zip(subchunks, range(len(subchunks))), key=lambda p: (p[0].parent_chunk_id, p[0].subchunk_index))
+    order = [i for _, i in sorted_pairs]
+    sorted_subchunks = [subchunks[i] for i in order]
+    sorted_vectors = vectors[order]
+
+    chunk_ids: List[str] = []
+    boundaries: List[int] = []
+    last_id = None
+    for i, sc in enumerate(sorted_subchunks):
+        if sc.parent_chunk_id != last_id:
+            chunk_ids.append(sc.parent_chunk_id)
+            boundaries.append(i)
+            last_id = sc.parent_chunk_id
+
+    return EmbeddingIndex(
+        subchunks=sorted_subchunks,
+        vectors=sorted_vectors,
+        chunk_ids=chunk_ids,
+        group_boundaries=np.array(boundaries, dtype=np.int64),
+    )
 
 
-def rank_books_for_topic(index: EmbeddingIndex, all_chunks: List[Chunk],
-                          corpus_by_key: Dict[str, BookCorpus],
-                          topic_text: str, subject_hint: str = "") -> List[dict]:
-    sims = semantic_scores(index, topic_text)
-    best_per_book = _best_chunk_per_book(all_chunks, sims)
+def _score_book_candidates(
+    topic_text: str,
+    book_keys: List[str],
+    corpus_by_key: Dict[str, BookCorpus],
+    indices: Dict[str, EmbeddingIndex],
+    model: EmbeddingModel,
+) -> List[Tuple[str, Chunk, float]]:
+    """Best (book_key, chunk, coverage_percent) per book, sorted best-first."""
+    results = []
+    for book_key in book_keys:
+        index = indices.get(book_key)
+        bc = corpus_by_key.get(book_key)
+        if index is None or bc is None or not bc.chunks:
+            continue
+        sem = semantic_scores(topic_text, index, model)
+        chunk_by_id = {c.chunk_id: c for c in bc.chunks}
+        md_score = metadata_score(bc.record.metadata)
 
-    scored = []
-    for book_key, (chunk, sem) in best_per_book.items():
-        title_text = f"{chunk.chapter_title} {chunk.section_title}".strip()
-        kw = keyword_score(topic_text, title_text, chunk.text)
-        fz = fuzzy_score(topic_text, title_text)
-        book_title = corpus_by_key[book_key].record.metadata.title
-        meta = _metadata_bonus(subject_hint or topic_text, book_title)
-        coverage = combine_scores(sem, kw, fz, meta)
-        scored.append({
-            "book_key": book_key, "chunk": chunk, "coverage": coverage,
-            "semantic": sem, "keyword": kw, "fuzzy": fz, "metadata": meta,
-        })
+        best_chunk, best_cov = None, -1.0
+        for chunk_id, sem_score in sem.items():
+            chunk = chunk_by_id.get(chunk_id)
+            if chunk is None:
+                continue
+            title = f"{chunk.chapter_title} {chunk.section_title}".strip()
+            kw = keyword_score(topic_text, title, chunk.text)
+            fz = fuzzy_score(topic_text, title)
+            cov = combine_scores(sem_score, kw, fz, md_score)
+            if cov > best_cov:
+                best_cov, best_chunk = cov, chunk
+        if best_chunk is not None:
+            results.append((book_key, best_chunk, best_cov))
 
-    scored.sort(key=lambda r: r["coverage"], reverse=True)
-    return scored[:config.TOP_N_BOOKS_PER_TOPIC]
+    results.sort(key=lambda r: -r[2])
+    return results
 
 
-def generate_recommendations(courses: List[SyllabusCourse],
-                              book_corpus: List[BookCorpus]) -> List[RecommendationRow]:
-    section("Matching syllabus topics against book corpus")
+def _make_row(
+    course: SyllabusCourse,
+    module: SyllabusModule,
+    topic_text: str,
+    book_key: Optional[str],
+    chunk: Optional[Chunk],
+    coverage: float,
+    corpus_by_key: Dict[str, BookCorpus],
+    notes: str = "",
+) -> RecommendationRow:
+    if book_key is None or chunk is None:
+        return RecommendationRow(
+            subject_code=course.code,
+            subject_name=course.name,
+            module_number=str(module.unit_number) if module.unit_number else module.unit_label,
+            module_title=module.unit_title,
+            topic=topic_text,
+            sub_topic="",
+            book_title="",
+            author="",
+            edition="",
+            publisher="",
+            year="",
+            book_type="",
+            chapter="",
+            page_start=None,
+            page_end=None,
+            coverage_percent=0.0,
+            status="Not Found",
+            notes=notes or "No cited book available locally covers this topic above threshold",
+        )
 
-    all_chunks = list(itertools.chain.from_iterable(c.chunks for c in book_corpus))
-    corpus_by_key = {c.record.key: c for c in book_corpus}
+    meta = corpus_by_key[book_key].record.metadata
+    chapter_label = chunk.section_label or chunk.chapter_label
+    chapter_title = chunk.section_title or chunk.chapter_title
+    return RecommendationRow(
+        subject_code=course.code,
+        subject_name=course.name,
+        module_number=str(module.unit_number) if module.unit_number else module.unit_label,
+        module_title=module.unit_title,
+        topic=topic_text,
+        sub_topic="",
+        book_title=meta.title,
+        author=meta.authors,
+        edition=meta.edition,
+        publisher=meta.publisher,
+        year=meta.year,
+        book_type=meta.book_type,
+        chapter=f"{chapter_label} {chapter_title}".strip(),
+        page_start=chunk.page_start + 1,  # report as 1-indexed printed-style pages
+        page_end=chunk.page_end + 1,
+        coverage_percent=coverage,
+        status="Found",
+        notes=coverage_label(coverage),
+    )
 
-    if not all_chunks:
-        log("No book chunks available at all - cannot produce recommendations.", "ERROR")
-        return []
 
-    index = build_index(all_chunks)
-
+def generate_recommendations(
+    courses: List[SyllabusCourse],
+    resolved_by_subject: Dict[str, List[ResolvedReference]],
+    corpus_by_key: Dict[str, BookCorpus],
+    indices: Dict[str, EmbeddingIndex],
+    model: EmbeddingModel,
+) -> List[RecommendationRow]:
     rows: List[RecommendationRow] = []
-    topic_count = 0
+
     for course in courses:
-        for module in course.modules:
-            # Query the granular topics when we have them; only fall back to
-            # the coarse unit title itself when no topics were parsed for
-            # this module. Querying both (as before) routinely produced two
-            # near-duplicate rows - the unit-title query and a topic query -
-            # landing on the same book chunk with near-identical coverage
-            # whenever a module's topic text closely echoes its own title.
-            if module.topics:
-                targets = [(module.unit_title, t) for t in module.topics]
+        resolved = resolved_by_subject.get(course.code, [])
+        textbook_keys, reference_keys = split_resolved_keys(resolved)
+
+        for module, topic_text in course.all_topics():
+            candidates: List[Tuple[str, Chunk, float]] = []
+            if textbook_keys:
+                candidates = _score_book_candidates(topic_text, textbook_keys, corpus_by_key, indices, model)
+                passing = [c for c in candidates if c[2] >= config.MIN_COVERAGE_PERCENT]
+                if passing:
+                    for book_key, chunk, cov in passing[: config.TOP_N_BOOKS_PER_TOPIC]:
+                        rows.append(_make_row(course, module, topic_text, book_key, chunk, cov, corpus_by_key))
+                    continue
+
+            if reference_keys:
+                candidates = _score_book_candidates(topic_text, reference_keys, corpus_by_key, indices, model)
+                passing = [c for c in candidates if c[2] >= config.MIN_COVERAGE_PERCENT]
+                if passing:
+                    for book_key, chunk, cov in passing[: config.TOP_N_BOOKS_PER_TOPIC]:
+                        rows.append(_make_row(course, module, topic_text, book_key, chunk, cov, corpus_by_key))
+                    continue
+
+            if not textbook_keys and not reference_keys:
+                notes = "No cited textbook/reference for this subject was found among the local books"
             else:
-                targets = [("", module.unit_title)]
-            for parent_topic, topic_text in targets:
-                topic_count += 1
-                ranked = rank_books_for_topic(
-                    index, all_chunks, corpus_by_key, topic_text,
-                    subject_hint=course.name,
-                )
-                for r in ranked:
-                    if r["coverage"] < config.MIN_COVERAGE_PERCENT:
-                        continue
-                    chunk = r["chunk"]
-                    meta = corpus_by_key[r["book_key"]].record.metadata
-                    chapter_label = chunk.chapter_label
-                    if chunk.section_label:
-                        chapter_label = f"{chunk.chapter_label}.{chunk.section_label}" \
-                            if chunk.section_label and not chunk.section_label.startswith(chunk.chapter_label) \
-                            else chunk.section_label
-                    chapter_display = f"{chapter_label} {chunk.section_title or chunk.chapter_title}".strip()
+                notes = "Cited books available locally, but none covered this topic above the coverage threshold"
+            rows.append(_make_row(course, module, topic_text, None, None, 0.0, corpus_by_key, notes=notes))
 
-                    rows.append(RecommendationRow(
-                        subject_code=course.code,
-                        subject_name=course.name,
-                        module_number=module.unit_label,
-                        module_title=module.unit_title,
-                        topic=parent_topic or module.unit_title,
-                        sub_topic=topic_text if parent_topic else "",
-                        book_title=meta.title,
-                        author=meta.authors,
-                        edition=meta.edition,
-                        publisher=meta.publisher,
-                        year=meta.year,
-                        book_type=meta.book_type,
-                        chapter=chapter_display,
-                        page_start=chunk.page_start,
-                        page_end=chunk.page_end,
-                        coverage_percent=round(r["coverage"], 1),
-                        notes=coverage_label(r["coverage"]),
-                    ))
-
-    log(f"Evaluated {topic_count} syllabus topics/subtopics -> {len(rows)} recommendation rows "
-        f"(coverage >= {config.MIN_COVERAGE_PERCENT}%)")
     return rows

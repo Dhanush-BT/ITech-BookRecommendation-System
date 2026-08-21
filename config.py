@@ -1,37 +1,59 @@
-"""
-Central configuration for the Syllabus <-> Book recommendation engine.
-"""
+"""Central tunables for the syllabus-to-textbook coverage mapper."""
 
 # --- TOC detection ---
-MAX_TOC_SCAN_PAGES = 60          # how many pages (from the front) to scan looking for a TOC
-MIN_TOC_SCORE = 35               # a page needs at least this score to be considered part of the TOC
-TOC_MAX_CONTIG_GAP = 2           # allow up to N non-scoring pages between TOC pages before we stop
-TOC_MERGE_GAP = 6                # after grouping, absorb a nearby smaller run into the main TOC run
-                                  # if it's within this many pages (handles a low-scoring divider/plate
-                                  # page splitting one real TOC into two runs)
+MAX_TOC_SCAN_PAGES = 60
+MIN_TOC_SCORE = 35
+TOC_MAX_CONTIG_GAP = 2
+TOC_MERGE_GAP = 6
 
-# --- Chunking (kept for architecture completeness / future embedding upgrade) ---
-CHUNK_SIZE_WORDS = 500
-CHUNK_OVERLAP_WORDS = 50
-# Some books have very coarse TOCs (a "chapter" can span hundreds of pages
-# with no sub-sections). Reading the whole span into memory for every such
-# chunk is both unnecessary (the topic signal is concentrated in the first
-# few pages of a chapter) and a real OOM risk on large PDFs, so extraction
-# for indexing purposes is capped at this many pages per chunk.
+# --- Section/chapter-level text extraction ---
 MAX_CHUNK_PAGES = 12
+USE_HEADING_FALLBACK = True
+MAX_HEADING_SCAN_PAGES = 500
+MIN_TOC_ENTRIES = 3  # below this, TOC is considered too sparse and heading fallback kicks in
+
+# --- Content-based page localization (fallback when TOC + headings both fail) ---
+CONTENT_LOCATOR_WINDOW_PAGES = 3
+CONTENT_LOCATOR_MAX_PAGES = 400  # cap how much of a degenerate book we'll scan
+
+# --- Sub-chunking for embeddings ---
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+EMBEDDING_MAX_SEQ_TOKENS = 512
+SUBCHUNK_WORDS = 350
+SUBCHUNK_OVERLAP_WORDS = 50
+SUBCHUNK_MIN_WORDS = 40
+EMBEDDING_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+EMBEDDING_BATCH_SIZE = 64
+EMBEDDING_DEVICE = None  # None = auto-detect mps > cuda > cpu
+
+# --- Semantic score calibration ---
+# Placeholder floor/ceiling; recalibrate against real corpus output via
+# scripts/calibrate_semantic_range.py before trusting downstream coverage numbers.
+SEMANTIC_SIM_FLOOR = 0.45
+SEMANTIC_SIM_CEILING = 0.85
+
+# --- Embedding cache ---
+USE_EMBEDDING_CACHE = True
+EMBEDDING_CACHE_DIR = "output/.embedding_cache"
 
 # --- Matching weights (must sum to 1.0) ---
-WEIGHT_SEMANTIC = 0.45   # TF-IDF cosine similarity over chapter/section text
-WEIGHT_KEYWORD = 0.25    # token overlap between topic and chapter/section titles + text
-WEIGHT_FUZZY = 0.20      # RapidFuzz string similarity between topic and chapter/section titles
-WEIGHT_METADATA = 0.10   # bonus if book title/subject words appear in the topic
+WEIGHT_SEMANTIC = 0.55
+WEIGHT_KEYWORD = 0.20
+WEIGHT_FUZZY = 0.15
+WEIGHT_METADATA = 0.10
 
-# Rows below this coverage are dropped from the final report. Only topics
-# that are genuinely well-covered by a book (>=70%) are considered
-# relevant enough to include.
 MIN_COVERAGE_PERCENT = 70
-TOP_N_BOOKS_PER_TOPIC = 3        # how many candidate books to keep per syllabus topic
+TOP_N_BOOKS_PER_TOPIC = 3
 
-# --- Misc ---
-USE_HEADING_FALLBACK = True
+# --- Reference-book scoping ---
+REFERENCE_MATCH_THRESHOLD = 70  # RapidFuzz 0-100 score for citation -> local file resolution
+STRICT_REFERENCE_SCOPING = True
+PREFER_TEXTBOOKS_OVER_REFERENCES = True
+
 LOG_VERBOSE = True
+
+# --- Paths ---
+BOOKS_DIR = "books"
+SYLLABI_DIR = "syllabi"
+OUTPUT_DIR = "output"
+OUTPUT_XLSX = "output/recommendations.xlsx"

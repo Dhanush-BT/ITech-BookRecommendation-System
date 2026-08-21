@@ -1,46 +1,31 @@
-"""
-Many PDFs (Springer titles especially) extract with word-spaces collapsed,
-e.g. "WhatIsAdditiveManufacturing" instead of "What Is Additive Manufacturing".
-This module detects that condition and repairs it well enough for tokenizing,
-fuzzy matching, and display.
-"""
+"""Repairs common PDF-extraction artifacts: cid escapes, broken hyphenation across
+line breaks, camelCase/digit-boundary word splitting, and whitespace collapse."""
 import re
 
-_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-_DIGIT_LETTER_RE = re.compile(r"(?<=[a-zA-Z])(?=\d)|(?<=\d)(?=[A-Za-z])")
-_WS_RE = re.compile(r"\s+")
+_CID_RE = re.compile(r"\(cid:\d+\)")
+_HYPHEN_LINEBREAK_RE = re.compile(r"(\w)-\n(\w)")
+_MULTI_NEWLINE_RE = re.compile(r"\n{2,}")
+_MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
+# lowercase immediately followed by uppercase, e.g. "thisIsMashed" -> "this Is Mashed"
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
+# letter immediately followed by digit or vice versa in a run, e.g. "Chapter3Intro"
+_ALPHA_DIGIT_BOUNDARY_RE = re.compile(r"(?<=[a-zA-Z])(?=\d)|(?<=\d)(?=[a-zA-Z])")
 
 
-def looks_space_collapsed(text: str, sample_chars: int = 2000) -> bool:
-    """Heuristic: real English text has roughly 1 space per 5-6 characters.
-    If a text sample has far fewer spaces than that, word boundaries were lost."""
-    sample = text[:sample_chars]
-    letters = sum(1 for c in sample if c.isalpha())
-    spaces = sample.count(" ")
-    if letters < 40:
-        return False
-    ratio = spaces / max(letters, 1)
-    return ratio < 0.08  # normal English prose is usually > 0.15
-
-
-def repair_spacing(text: str) -> str:
-    """Insert spaces at lower->UPPER and letter<->digit boundaries.
-    Not perfect (can't split 'aB' from run-on lowercase words) but recovers
-    the overwhelming majority of word boundaries in headings/titles."""
+def _split_mashed_words(text: str) -> str:
     text = _CAMEL_BOUNDARY_RE.sub(" ", text)
-    text = _DIGIT_LETTER_RE.sub(" ", text)
-    text = _WS_RE.sub(" ", text)
-    return text.strip()
+    text = _ALPHA_DIGIT_BOUNDARY_RE.sub(" ", text)
+    return text
 
 
-def clean_text(text: str) -> str:
-    """Full cleaning pass: fix ligature/cid artifacts, repair spacing if needed,
-    normalize whitespace."""
+def clean_text(text: str, split_mashed: bool = False) -> str:
     if not text:
         return ""
-    # Drop stray (cid:129) style artifacts left by broken font maps (seen as bullets)
-    text = re.sub(r"\(cid:\d+\)", " ", text)
-    if looks_space_collapsed(text):
-        text = repair_spacing(text)
-    text = _WS_RE.sub(" ", text)
+    text = _CID_RE.sub(" ", text)
+    text = _HYPHEN_LINEBREAK_RE.sub(r"\1\2", text)
+    if split_mashed:
+        text = _split_mashed_words(text)
+    text = text.replace("\r", "\n")
+    text = _MULTI_SPACE_RE.sub(" ", text)
+    text = _MULTI_NEWLINE_RE.sub("\n", text)
     return text.strip()
