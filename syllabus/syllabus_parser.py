@@ -43,9 +43,56 @@ from utils.regex_patterns import (
 )
 from utils.roman import parse_unit_number
 
-_OBJECTIVES_RE = re.compile(r"OBJECTIVES?\s*:", re.IGNORECASE)
-_TRAILING_HOURS_RE = re.compile(r"\s+\d{1,3}\s*$")
+_OBJECTIVES_RE = re.compile(r"OBJECTIVES?\s*:?", re.IGNORECASE)
 _TOPIC_SPLIT_RE = re.compile(r"\s+[–—-]\s+")
+# Unit-header lines carry an L-T-P-C / period-count tail ("MATRICES  9 + 0 + 0
+# + 3", "... 9") after the title. Unit titles are alphabetic, so cut at the
+# first standalone number (a digit run not glued to a letter, e.g. keep "3D").
+_UNIT_TITLE_TAIL_RE = re.compile(r"\s+\d{1,3}(?![A-Za-z]).*$", re.DOTALL)
+
+# Anna-University syllabi use the same spaced dash both as the topic separator
+# and, inconsistently, inside hyphenated eponymous names ("Cayley - Hamilton
+# theorem", "Gram - Schmidt orthogonalization"). Splitting naively turns those
+# into two useless half-topics ("Cayley", "Hamilton theorem"), which then never
+# match a book section. Re-join a lone surname fragment to the next one when the
+# next fragment opens with another capitalised name and carries an eponymous
+# descriptor -- i.e. it reads like "<Name>-<Name> <thing>".
+_LONE_NAME_RE = re.compile(r"^[A-Z][A-Za-z’'.]+$")
+_EPONYM_HEAD_RE = re.compile(r"^[A-Z][A-Za-z’'.]+\b")
+_EPONYM_DESCRIPTOR_RE = re.compile(
+    r"\b(theorem|method|rule|equation|equations|formula|series|law|laws|"
+    r"criterion|criteria|test|process|algorithm|transformation|elimination|"
+    r"iteration|orthogonalization|orthogonalisation|identity|inequality|"
+    r"polynomial|polynomials|expansion|approximation)\b",
+    re.IGNORECASE,
+)
+# Capitalised generic words that also pass _LONE_NAME_RE but are never the
+# surname half of an eponymous compound.
+_NOT_A_SURNAME = frozenset(
+    "applications application introduction properties fundamentals basics overview "
+    "analysis design types definition definitions examples theory methods method "
+    "concepts principles problems problem review summary notes".split()
+)
+
+
+def _merge_eponym_splits(topics: List[str]) -> List[str]:
+    merged: List[str] = []
+    i = 0
+    while i < len(topics):
+        cur = topics[i]
+        if (
+            i + 1 < len(topics)
+            and _LONE_NAME_RE.match(cur)
+            and cur.lower().rstrip(".") not in _NOT_A_SURNAME
+            and _EPONYM_HEAD_RE.match(topics[i + 1])
+            and _EPONYM_DESCRIPTOR_RE.search(topics[i + 1])
+        ):
+            merged.append(f"{cur}-{topics[i + 1]}")
+            i += 2
+        else:
+            merged.append(cur)
+            i += 1
+    return merged
 
 
 @dataclass
@@ -132,8 +179,9 @@ def _parse_units(block: str) -> List[SyllabusModule]:
         if end_marker:
             body = body[: end_marker.start()]
 
-        # unit title is often on the header line, possibly with trailing hour count
-        title_line = _TRAILING_HOURS_RE.sub("", rest_of_line).strip(" -:–")
+        # unit title is often on the header line, followed by an L-T-P-C tail
+        title_line = _UNIT_TITLE_TAIL_RE.sub("", rest_of_line).strip(" -:–")
+        title_line = re.sub(r"\s+", " ", title_line)
         body_norm = re.sub(r"\s+", " ", body).strip()
 
         if not title_line and body_norm:
@@ -147,6 +195,7 @@ def _parse_units(block: str) -> List[SyllabusModule]:
         topics = [t.strip(" .") for t in _TOPIC_SPLIT_RE.split(body_norm) if t.strip(" .")]
         # drop a pure-numeric leftover ("9" hour count) if it slipped into the split
         topics = [t for t in topics if not re.fullmatch(r"\d{1,3}", t)]
+        topics = _merge_eponym_splits(topics)
 
         modules.append(
             SyllabusModule(

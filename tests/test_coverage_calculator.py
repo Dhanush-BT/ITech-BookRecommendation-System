@@ -25,7 +25,9 @@ class TestCoverageCalculator(unittest.TestCase):
         self.assertEqual(coverage_label(95), "Excellent")
         self.assertEqual(coverage_label(80), "Good")
         self.assertEqual(coverage_label(config.MIN_COVERAGE_PERCENT), "Moderate")
-        self.assertEqual(coverage_label(config.MIN_COVERAGE_PERCENT - 1), "Weak")
+        self.assertEqual(coverage_label(config.MIN_COVERAGE_PERCENT - 1), "Tentative")
+        self.assertEqual(coverage_label(config.TENTATIVE_COVERAGE_PERCENT), "Tentative")
+        self.assertEqual(coverage_label(config.TENTATIVE_COVERAGE_PERCENT - 1), "Weak")
 
     def test_rescale_semantic_floor_and_ceiling(self):
         self.assertEqual(rescale_semantic(config.SEMANTIC_SIM_FLOOR), 0.0)

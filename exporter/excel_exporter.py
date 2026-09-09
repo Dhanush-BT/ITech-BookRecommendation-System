@@ -36,8 +36,10 @@ _COLUMNS = [
     ("year", "Year"),
     ("book_type", "Book Type"),
     ("chapter", "Chapter"),
-    ("page_start", "Page Start"),
-    ("page_end", "Page End"),
+    ("page_start", "Book Page Start"),
+    ("page_end", "Book Page End"),
+    ("pdf_page_start", "PDF Page Start"),
+    ("pdf_page_end", "PDF Page End"),
     ("coverage_percent", "Coverage %"),
     ("notes", "Notes"),
 ]
@@ -64,7 +66,7 @@ def _write_recommendations_sheet(wb: Workbook, rows: List[RecommendationRow]) ->
             value = getattr(row, attr)
             ws.cell(row=row_idx, column=col_idx, value=_sanitize(value))
 
-    widths = [14, 28, 8, 24, 30, 20, 12, 34, 22, 10, 18, 8, 12, 24, 10, 10, 11, 34]
+    widths = [14, 28, 8, 24, 30, 20, 12, 34, 22, 10, 18, 8, 12, 24, 10, 10, 12, 12, 11, 34]
     for col_idx, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
@@ -75,44 +77,50 @@ def _write_recommendations_sheet(wb: Workbook, rows: List[RecommendationRow]) ->
 def _write_summary_sheet(wb: Workbook, rows: List[RecommendationRow]) -> None:
     ws = wb.create_sheet("Summary")
 
-    per_subject = defaultdict(lambda: {"found": 0, "not_found": 0, "name": ""})
+    per_subject = defaultdict(lambda: {"found": 0, "tentative": 0, "not_found": 0, "name": ""})
     for row in rows:
         stats = per_subject[row.subject_code]
         stats["name"] = row.subject_name
         if row.status == "Found":
             stats["found"] += 1
+        elif row.status == "Tentative":
+            stats["tentative"] += 1
         else:
             stats["not_found"] += 1
 
-    headers = ["Subject Code", "Subject Name", "Found", "Not Found", "Total", "Coverage Rate"]
+    headers = ["Subject Code", "Subject Name", "Found", "Tentative", "Not Found", "Total", "Coverage Rate"]
     for col_idx, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_idx, value=header)
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
 
     row_idx = 2
-    total_found = total_not_found = 0
+    total_found = total_tentative = total_not_found = 0
     for subject_code in sorted(per_subject):
         stats = per_subject[subject_code]
-        total = stats["found"] + stats["not_found"]
-        rate = f"{(stats['found'] / total * 100):.0f}%" if total else "0%"
+        total = stats["found"] + stats["tentative"] + stats["not_found"]
+        covered = stats["found"] + stats["tentative"]
+        rate = f"{(covered / total * 100):.0f}%" if total else "0%"
         ws.cell(row=row_idx, column=1, value=subject_code)
         ws.cell(row=row_idx, column=2, value=_sanitize(stats["name"]))
         ws.cell(row=row_idx, column=3, value=stats["found"])
-        ws.cell(row=row_idx, column=4, value=stats["not_found"])
-        ws.cell(row=row_idx, column=5, value=total)
-        ws.cell(row=row_idx, column=6, value=rate)
+        ws.cell(row=row_idx, column=4, value=stats["tentative"])
+        ws.cell(row=row_idx, column=5, value=stats["not_found"])
+        ws.cell(row=row_idx, column=6, value=total)
+        ws.cell(row=row_idx, column=7, value=rate)
         total_found += stats["found"]
+        total_tentative += stats["tentative"]
         total_not_found += stats["not_found"]
         row_idx += 1
 
     row_idx += 1
     ws.cell(row=row_idx, column=1, value="TOTAL").font = Font(bold=True)
     ws.cell(row=row_idx, column=3, value=total_found).font = Font(bold=True)
-    ws.cell(row=row_idx, column=4, value=total_not_found).font = Font(bold=True)
-    ws.cell(row=row_idx, column=5, value=total_found + total_not_found).font = Font(bold=True)
+    ws.cell(row=row_idx, column=4, value=total_tentative).font = Font(bold=True)
+    ws.cell(row=row_idx, column=5, value=total_not_found).font = Font(bold=True)
+    ws.cell(row=row_idx, column=6, value=total_found + total_tentative + total_not_found).font = Font(bold=True)
 
-    for col_idx, width in enumerate([14, 30, 10, 12, 10, 14], 1):
+    for col_idx, width in enumerate([14, 30, 10, 11, 10, 10, 14], 1):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 

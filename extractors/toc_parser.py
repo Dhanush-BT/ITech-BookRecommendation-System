@@ -10,6 +10,12 @@ from utils.regex_patterns import TOC_DOTTED_LEADER_RE, TOC_TRAILING_PAGE_RE
 _NUMERIC_LABEL_RE = re.compile(r"^(\d+(?:\.\d+)*)[\.\):]?\s+(.*)$")
 _CHAPTER_LABEL_RE = re.compile(r"^(Chapter|Unit|Part)\s+(\d+|[IVXLCDM]+)[\.\):]?\s*(.*)$", re.IGNORECASE)
 _NOISE_LINE_RE = re.compile(r"^(CONTENTS?|TABLE OF CONTENTS|[ivxlcdm]+|\d{1,4})$", re.IGNORECASE)
+# A running "Contents" / "iv Contents" / "Contents ix" page header often gets
+# glued onto the first real TOC line of a page by the extractor -- strip that
+# leak so it doesn't become (part of) an entry title.
+_CONTENTS_HEADER_RE = re.compile(
+    r"^(?:[ivxlcdm]{1,6}\s+)?contents\s+(?:[ivxlcdm]{1,6}\s+)?", re.IGNORECASE
+)
 
 # Front-matter TOC lines (Preface, Acknowledgments, ...) are often paginated with
 # roman numerals, which never match a digit-page pattern below and would otherwise
@@ -76,6 +82,7 @@ def parse_toc(doc: PDFDocument, start_page: int, end_page: int) -> List[TOCEntry
                 continue
             full_title = f"{pending} {title_part}".strip() if pending else title_part
             pending = ""
+            full_title = _CONTENTS_HEADER_RE.sub("", full_title).strip()
             if not full_title:
                 continue
             label, title, level = _split_label(full_title)

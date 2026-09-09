@@ -43,6 +43,11 @@ WEIGHT_FUZZY = 0.15
 WEIGHT_METADATA = 0.10
 
 MIN_COVERAGE_PERCENT = 70
+# When nothing clears MIN_COVERAGE_PERCENT, the single best candidate is still
+# reported (status "Tentative") as long as it clears this weaker bar, instead
+# of a bare "Not Found" -- terse one-word syllabus topics ("Jacobians") and
+# topics whose best local coverage is a broader section land in this band.
+TENTATIVE_COVERAGE_PERCENT = 55
 TOP_N_BOOKS_PER_TOPIC = 3
 
 # --- Reference-book scoping ---

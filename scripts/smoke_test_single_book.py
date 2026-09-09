@@ -28,9 +28,9 @@ def main() -> None:
     print()
 
     for ch in rec.chapters:
-        print(f"  {ch.label or '-'} | {ch.title!r} | pages {ch.page_start}-{ch.page_end} | {len(ch.sections)} sections")
+        print(f"  {ch.label or '-'} | {ch.title!r} | pdf pages {ch.page_start}-{ch.page_end} | book pages {ch.book_page_start}-{ch.book_page_end} | {len(ch.sections)} sections")
         for sec in ch.sections[:5]:
-            print(f"      {sec.label or '-'} | {sec.title!r} | pages {sec.page_start}-{sec.page_end}")
+            print(f"      {sec.label or '-'} | {sec.title!r} | pdf pages {sec.page_start}-{sec.page_end} | book pages {sec.book_page_start}-{sec.book_page_end}")
         if len(ch.sections) > 5:
             print(f"      ... and {len(ch.sections) - 5} more sections")
 

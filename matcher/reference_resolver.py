@@ -43,21 +43,42 @@ class ResolvedReference:
     match_score: float
 
 
-def _extract_title(raw_line: str) -> Optional[str]:
+def _title_match(raw_line: str):
     m = _QUOTE_RE.search(raw_line)
     if m:
-        return m.group(1).strip()
-    m = _BY_TITLE_RE.match(raw_line)
-    if m:
-        return m.group(1).strip()
-    return None
+        return m.group(1).strip(), m
+    m2 = _BY_TITLE_RE.match(raw_line)
+    if m2:
+        return m2.group(1).strip(), None
+    return None, None
+
+
+def _extract_title(raw_line: str) -> Optional[str]:
+    title, _ = _title_match(raw_line)
+    return title
 
 
 def _match_score(raw_line: str, book_title: str, book_authors: str, filename: str) -> float:
-    extracted_title = _extract_title(raw_line)
+    # rapidfuzz's ratio/token_set_ratio/partial_ratio do NOT normalize case on
+    # their own, and book metadata titles/authors are frequently ALL CAPS
+    # (extracted from PDF cover pages) while syllabus citations are Title
+    # Case -- an exact-content match like "ERWIN KREYSZIG" vs "Kreyszig.E"
+    # would otherwise score near zero. Lowercase everything before comparing.
+    raw_line = raw_line.lower()
+    book_title = book_title.lower()
+    book_authors = book_authors.lower()
+    filename = filename.lower()
+
+    extracted_title, quote_match = _title_match(raw_line)
     if extracted_title and book_title:
         title_score = fuzz.token_set_ratio(extracted_title, book_title)
-        author_score = fuzz.partial_ratio(raw_line, book_authors) if book_authors else 0.0
+        # Compare the book's author list only against the text preceding the
+        # quoted title (where these citations put the author names), not the
+        # whole line -- publisher/city noise later in the line ("McGraw Hill")
+        # can otherwise coincidentally partial-match an unrelated short author
+        # name and let a wrong-author citation slip past the gate.
+        author_region = raw_line[: quote_match.start()] if quote_match else raw_line
+        author_score = fuzz.partial_ratio(author_region, book_authors) if book_authors else 0.0
         if author_score < _AUTHOR_GATE:
             return 0.0
         return _TITLE_WEIGHT * title_score + _AUTHOR_WEIGHT * author_score

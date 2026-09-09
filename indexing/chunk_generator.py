@@ -1,7 +1,7 @@
 """Flattens a book's Chapter/Section tree into flat Chunk objects: one per
 section when a chapter has parsed sections, otherwise one per chapter."""
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import config
 from extractors.chapter_builder import Chapter
@@ -17,9 +17,11 @@ class Chunk:
     chapter_title: str
     section_label: str
     section_title: str
-    page_start: int
+    page_start: int  # 0-indexed position within the PDF file
     page_end: int
     text: str
+    book_page_start: Optional[int] = None  # printed page number as it appears in the book
+    book_page_end: Optional[int] = None
 
 
 def _bounded_text(doc: PDFDocument, page_start: int, page_end: int) -> str:
@@ -45,6 +47,8 @@ def generate_chunks(doc: PDFDocument, chapters: List[Chapter], book_key: str) ->
                         page_start=section.page_start,
                         page_end=section.page_end,
                         text=text,
+                        book_page_start=section.book_page_start,
+                        book_page_end=section.book_page_end,
                     )
                 )
         else:
@@ -61,6 +65,8 @@ def generate_chunks(doc: PDFDocument, chapters: List[Chapter], book_key: str) ->
                     page_start=chapter.page_start,
                     page_end=chapter.page_end,
                     text=text,
+                    book_page_start=chapter.book_page_start,
+                    book_page_end=chapter.book_page_end,
                 )
             )
     return chunks

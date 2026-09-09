@@ -3,12 +3,42 @@
 One PDFDocument per file path; use get_document() to reuse the same instance
 across the pipeline instead of re-opening/re-parsing the same PDF repeatedly.
 """
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import pypdf
 
 from utils.logger import log
+
+# Several PDFs in the corpus (Anton, Stewart, ...) use fonts whose f-ligature
+# glyphs are encoded at the C0 control-code points 0x0B-0x0F instead of the
+# Unicode ligature block, so pypdf hands them back as raw control chars in the
+# middle of words ("di\x0berential", "de\x0cned", "in\rection", "\x0crst").
+# Left alone these break tokenization, keyword overlap, fuzzy title matching
+# and embedding quality alike -- and the Excel exporter later strips them,
+# silently welding the word halves together ("dierential"). 0x0C (form feed)
+# and 0x0D (CR) also carry real structural meaning, so a control code is only
+# read as a ligature when a lowercase letter follows it (mid- or start-of-word);
+# a page break / line ending is followed by whitespace or an uppercase heading.
+_CTRL_LIGATURES = {
+    "\x0b": "ff", "\x0c": "fi", "\x0d": "fl", "\x0e": "ffi", "\x0f": "ffl",
+}
+_CTRL_LIGATURE_RE = re.compile(r"[\x0b-\x0f](?=[a-z])")
+_UNICODE_LIGATURES = {
+    "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "ft", "ﬆ": "st",
+}
+
+
+def _normalize_ligatures(text: str) -> str:
+    if not text:
+        return text
+    if _CTRL_LIGATURE_RE.search(text):
+        text = _CTRL_LIGATURE_RE.sub(lambda m: _CTRL_LIGATURES[m.group(0)], text)
+    for bad, good in _UNICODE_LIGATURES.items():
+        if bad in text:
+            text = text.replace(bad, good)
+    return text
 
 
 @dataclass
@@ -50,7 +80,7 @@ class PDFDocument:
         text = ""
         if self._reader is not None and 0 <= page_index < self.num_pages:
             try:
-                text = self._reader.pages[page_index].extract_text() or ""
+                text = _normalize_ligatures(self._reader.pages[page_index].extract_text() or "")
             except Exception as exc:
                 log(f"WARNING: failed to extract page {page_index} of {self.path}: {exc}")
                 text = ""

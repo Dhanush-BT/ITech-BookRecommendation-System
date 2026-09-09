@@ -1,7 +1,7 @@
 import unittest
 
 from matcher.reference_resolver import _extract_title, _match_score
-from syllabus.syllabus_parser import _parse_cited_books, _parse_units
+from syllabus.syllabus_parser import _merge_eponym_splits, _parse_cited_books, _parse_units
 
 
 class TestUnitParsing(unittest.TestCase):
@@ -19,6 +19,37 @@ class TestUnitParsing(unittest.TestCase):
         self.assertIn("Mechanisms", modules[0].topics)
         self.assertIn("Terminology and definitions", modules[0].topics)
         self.assertEqual(modules[1].unit_number, 2)
+
+    def test_parse_units_rejoins_eponymous_compound(self):
+        block = (
+            "UNIT I MATRICES 9\n"
+            "Eigenvalues and Eigenvectors - Cayley - Hamilton theorem - "
+            "Diagonalization of matrices.\n"
+            "TOTAL: 45 PERIODS\n"
+        )
+        topics = _parse_units(block)[0].topics
+        self.assertIn("Cayley-Hamilton theorem", topics)
+        self.assertNotIn("Cayley", topics)
+        self.assertNotIn("Hamilton theorem", topics)
+
+
+class TestEponymMerge(unittest.TestCase):
+    def test_merges_surname_then_named_theorem(self):
+        self.assertEqual(
+            _merge_eponym_splits(["Cayley", "Hamilton theorem", "Diagonalization"]),
+            ["Cayley-Hamilton theorem", "Diagonalization"],
+        )
+        self.assertEqual(
+            _merge_eponym_splits(["Gram", "Schmidt orthogonalization process"]),
+            ["Gram-Schmidt orthogonalization process"],
+        )
+
+    def test_leaves_standalone_single_word_topics_alone(self):
+        # "Jacobians" is a real one-word topic, not the head of a compound.
+        self.assertEqual(
+            _merge_eponym_splits(["Change of variables", "Jacobians", "Partial differentiation of implicit functions"]),
+            ["Change of variables", "Jacobians", "Partial differentiation of implicit functions"],
+        )
 
 
 class TestCitedBookParsing(unittest.TestCase):

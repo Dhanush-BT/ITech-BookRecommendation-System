@@ -35,4 +35,6 @@ def coverage_label(coverage_percent: float) -> str:
         return "Good"
     if coverage_percent >= config.MIN_COVERAGE_PERCENT:
         return "Moderate"
+    if coverage_percent >= config.TENTATIVE_COVERAGE_PERCENT:
+        return "Tentative"
     return "Weak"
