@@ -32,6 +32,7 @@ from typing import Iterator, List, Optional, Tuple
 
 import pypdf
 
+from syllabus.standardizer import standardize_syllabus_text
 from utils.logger import log
 from utils.regex_patterns import (
     COURSE_CODE_RE,
@@ -43,7 +44,18 @@ from utils.regex_patterns import (
 )
 from utils.roman import parse_unit_number
 
-_OBJECTIVES_RE = re.compile(r"OBJECTIVES?\s*:?", re.IGNORECASE)
+# Gate used by _find_course_starts() to confirm a course-code match is a real
+# detailed-syllabus header (not a curriculum-table row). Most templates put
+# "COURSE OBJECTIVES:" right after the L-T-P-C line, well within the window
+# below -- but some (observed in a Mech curriculum) insert a "Preamble:" /
+# "Prerequisite:" block between the L-T-P-C line and "Course Objectives:",
+# which alone can push OBJECTIVES past a narrow window. Accepting PREAMBLE as
+# an equally-valid "yes, this is a real course header" signal recovers those
+# without widening the window itself -- widening the window instead was tried
+# and matches unrelated component/part numbers ("LM317", "MSP430", "ISBN10")
+# elsewhere as false course-code hits, so the window stays narrow and this
+# gate just grows one more accepted keyword.
+_OBJECTIVES_RE = re.compile(r"OBJECTIVES?\s*:?|PREAMBLE\s*:?", re.IGNORECASE)
 _TOPIC_SPLIT_RE = re.compile(r"\s+[–—-]\s+")
 # Unit-header lines carry an L-T-P-C / period-count tail ("MATRICES  9 + 0 + 0
 # + 3", "... 9") after the title. Unit titles are alphabetic, so cut at the
@@ -192,6 +204,14 @@ def _parse_units(block: str) -> List[SyllabusModule]:
             title_line = body_norm[: first_dash if first_dash > 0 else len(body_norm)].strip()
             body_norm = body_norm[len(title_line):].strip(" -:–")
 
+        # A body should never legitimately open with a bare separator, but one
+        # can appear when the first topic line's own marker (e.g. a bulleted
+        # topic list rewritten by syllabus/standardizer.py) collapses onto the
+        # very start of the body with nothing preceding it for the split
+        # regex's `\s+` to consume -- strip it so that first topic splits
+        # cleanly like the rest instead of dragging the dash along with it.
+        body_norm = re.sub(r"^[–—-]\s+", "", body_norm)
+
         topics = [t.strip(" .") for t in _TOPIC_SPLIT_RE.split(body_norm) if t.strip(" .")]
         # drop a pure-numeric leftover ("9" hour count) if it slipped into the split
         topics = [t for t in topics if not re.fullmatch(r"\d{1,3}", t)]
@@ -226,15 +246,20 @@ def _parse_cited_books(block: str) -> List[CitedBook]:
             entry_end = entries[i + 1].start() if i + 1 < len(entries) else len(section)
             raw_full = re.sub(r"\s+", " ", section[entry_start:entry_end]).strip()
             raw = re.sub(r"^\d{1,2}[\.\)]\s*", "", raw_full)
-            if raw:
+            # Some syllabi list numbered placeholder slots with no citation text
+            # ("TEXT BOOKS: 1  2 "), which would otherwise surface as a bogus
+            # entry like "1 2" once whitespace is collapsed. A citation carries
+            # no title/author in any script if it has no letters at all -- drop
+            # only those, not short-but-real citations (this also does not
+            # depend on the citation being in Latin script).
+            if raw and any(ch.isalpha() for ch in raw):
                 cited.append(CitedBook(raw_line=raw, citation_type=citation_type))
     return cited
 
 
-def parse_syllabus_pdf(path: str) -> List[SyllabusCourse]:
-    text = _extract_full_text(path)
+def _build_courses(text: str, source_file: str) -> List[SyllabusCourse]:
     starts = _find_course_starts(text)
-    log(f"syllabus_parser: found {len(starts)} subject sections in {path}")
+    log(f"syllabus_parser: found {len(starts)} subject sections in {source_file}")
 
     courses = []
     for i, (idx, code, name) in enumerate(starts):
@@ -248,7 +273,26 @@ def parse_syllabus_pdf(path: str) -> List[SyllabusCourse]:
                 name=name,
                 modules=modules,
                 cited_books=cited_books,
-                source_file=path,
+                source_file=source_file,
             )
         )
     return courses
+
+
+def parse_syllabus_text(text: str, source_file: str = "<text>") -> List[SyllabusCourse]:
+    """Standardize already-extracted syllabus text, then parse it. Split out
+    from parse_syllabus_pdf so a caller that already has text in hand (e.g.
+    scripts/standardize_syllabus.py) can run/inspect the same normalization +
+    parsing path without re-running PDF extraction."""
+    text, changes = standardize_syllabus_text(text)
+    if changes:
+        log(
+            f"syllabus_parser: standardized {source_file} "
+            f"({', '.join(f'{k}={v}' for k, v in sorted(changes.items()))})"
+        )
+    return _build_courses(text, source_file)
+
+
+def parse_syllabus_pdf(path: str) -> List[SyllabusCourse]:
+    text = _extract_full_text(path)
+    return parse_syllabus_text(text, source_file=path)

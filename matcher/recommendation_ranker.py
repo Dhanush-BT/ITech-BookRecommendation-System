@@ -4,6 +4,7 @@ citations are tried first, reference citations only if no textbook clears the
 coverage threshold, and a topic with no qualifying match anywhere gets an
 explicit Not Found row rather than being silently dropped -- every syllabus
 topic must produce at least one output row."""
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -43,6 +44,7 @@ class BookCorpus:
 
 @dataclass
 class RecommendationRow:
+    syllabus_name: str
     subject_code: str
     subject_name: str
     module_number: str
@@ -204,6 +206,7 @@ def _make_row(
 ) -> RecommendationRow:
     if book_key is None or chunk is None:
         return RecommendationRow(
+            syllabus_name=os.path.basename(course.source_file),
             subject_code=course.code,
             subject_name=course.name,
             module_number=str(module.unit_number) if module.unit_number else module.unit_label,
@@ -230,6 +233,7 @@ def _make_row(
     chapter_label = chunk.section_label or chunk.chapter_label
     chapter_title = chunk.section_title or chunk.chapter_title
     return RecommendationRow(
+        syllabus_name=os.path.basename(course.source_file),
         subject_code=course.code,
         subject_name=course.name,
         module_number=str(module.unit_number) if module.unit_number else module.unit_label,

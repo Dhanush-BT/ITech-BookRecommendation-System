@@ -22,6 +22,7 @@ _HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="
 _HEADER_FONT = Font(color="FFFFFF", bold=True)
 
 _COLUMNS = [
+    ("syllabus_name", "Syllabus"),
     ("subject_code", "Subject Code"),
     ("subject_name", "Subject Name"),
     ("module_number", "Unit"),
@@ -66,7 +67,7 @@ def _write_recommendations_sheet(wb: Workbook, rows: List[RecommendationRow]) ->
             value = getattr(row, attr)
             ws.cell(row=row_idx, column=col_idx, value=_sanitize(value))
 
-    widths = [14, 28, 8, 24, 30, 20, 12, 34, 22, 10, 18, 8, 12, 24, 10, 10, 12, 12, 11, 34]
+    widths = [30, 14, 28, 8, 24, 30, 20, 12, 34, 22, 10, 18, 8, 12, 24, 10, 10, 12, 12, 11, 34]
     for col_idx, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
@@ -77,9 +78,11 @@ def _write_recommendations_sheet(wb: Workbook, rows: List[RecommendationRow]) ->
 def _write_summary_sheet(wb: Workbook, rows: List[RecommendationRow]) -> None:
     ws = wb.create_sheet("Summary")
 
+    # Keyed by (syllabus, code) and kept in first-seen order, so each syllabus's
+    # subjects stay together in the same order as the Recommendations sheet.
     per_subject = defaultdict(lambda: {"found": 0, "tentative": 0, "not_found": 0, "name": ""})
     for row in rows:
-        stats = per_subject[row.subject_code]
+        stats = per_subject[(row.syllabus_name, row.subject_code)]
         stats["name"] = row.subject_name
         if row.status == "Found":
             stats["found"] += 1
@@ -88,7 +91,7 @@ def _write_summary_sheet(wb: Workbook, rows: List[RecommendationRow]) -> None:
         else:
             stats["not_found"] += 1
 
-    headers = ["Subject Code", "Subject Name", "Found", "Tentative", "Not Found", "Total", "Coverage Rate"]
+    headers = ["Syllabus", "Subject Code", "Subject Name", "Found", "Tentative", "Not Found", "Total", "Coverage Rate"]
     for col_idx, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_idx, value=header)
         cell.fill = _HEADER_FILL
@@ -96,18 +99,18 @@ def _write_summary_sheet(wb: Workbook, rows: List[RecommendationRow]) -> None:
 
     row_idx = 2
     total_found = total_tentative = total_not_found = 0
-    for subject_code in sorted(per_subject):
-        stats = per_subject[subject_code]
+    for (syllabus_name, subject_code), stats in per_subject.items():
         total = stats["found"] + stats["tentative"] + stats["not_found"]
         covered = stats["found"] + stats["tentative"]
         rate = f"{(covered / total * 100):.0f}%" if total else "0%"
-        ws.cell(row=row_idx, column=1, value=subject_code)
-        ws.cell(row=row_idx, column=2, value=_sanitize(stats["name"]))
-        ws.cell(row=row_idx, column=3, value=stats["found"])
-        ws.cell(row=row_idx, column=4, value=stats["tentative"])
-        ws.cell(row=row_idx, column=5, value=stats["not_found"])
-        ws.cell(row=row_idx, column=6, value=total)
-        ws.cell(row=row_idx, column=7, value=rate)
+        ws.cell(row=row_idx, column=1, value=_sanitize(syllabus_name))
+        ws.cell(row=row_idx, column=2, value=subject_code)
+        ws.cell(row=row_idx, column=3, value=_sanitize(stats["name"]))
+        ws.cell(row=row_idx, column=4, value=stats["found"])
+        ws.cell(row=row_idx, column=5, value=stats["tentative"])
+        ws.cell(row=row_idx, column=6, value=stats["not_found"])
+        ws.cell(row=row_idx, column=7, value=total)
+        ws.cell(row=row_idx, column=8, value=rate)
         total_found += stats["found"]
         total_tentative += stats["tentative"]
         total_not_found += stats["not_found"]
@@ -115,12 +118,12 @@ def _write_summary_sheet(wb: Workbook, rows: List[RecommendationRow]) -> None:
 
     row_idx += 1
     ws.cell(row=row_idx, column=1, value="TOTAL").font = Font(bold=True)
-    ws.cell(row=row_idx, column=3, value=total_found).font = Font(bold=True)
-    ws.cell(row=row_idx, column=4, value=total_tentative).font = Font(bold=True)
-    ws.cell(row=row_idx, column=5, value=total_not_found).font = Font(bold=True)
-    ws.cell(row=row_idx, column=6, value=total_found + total_tentative + total_not_found).font = Font(bold=True)
+    ws.cell(row=row_idx, column=4, value=total_found).font = Font(bold=True)
+    ws.cell(row=row_idx, column=5, value=total_tentative).font = Font(bold=True)
+    ws.cell(row=row_idx, column=6, value=total_not_found).font = Font(bold=True)
+    ws.cell(row=row_idx, column=7, value=total_found + total_tentative + total_not_found).font = Font(bold=True)
 
-    for col_idx, width in enumerate([14, 30, 10, 11, 10, 10, 14], 1):
+    for col_idx, width in enumerate([30, 14, 30, 10, 11, 10, 10, 14], 1):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 

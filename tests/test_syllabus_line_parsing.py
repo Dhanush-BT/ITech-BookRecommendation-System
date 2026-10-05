@@ -67,6 +67,17 @@ class TestCitedBookParsing(unittest.TestCase):
         self.assertEqual(len(references), 1)
         self.assertIn("Title Three", references[0].raw_line)
 
+    def test_numbered_entry_without_punctuation_after_number(self):
+        # some syllabi number citations as "1 Author..." with no "." or ")"
+        block = (
+            'TEXT BOOKS:\n1 Author A, "Title One", Publisher, 2020\n'
+            '2 Author B, "Title Two", Publisher, 2019\n'
+        )
+        cited = _parse_cited_books(block)
+        textbooks = [c for c in cited if c.citation_type == "textbook"]
+        self.assertEqual(len(textbooks), 2)
+        self.assertIn("Title Two", textbooks[1].raw_line)
+
     def test_reference_section_does_not_bleed_into_next_header(self):
         block = (
             'TEXT BOOKS :\n1. Author A, "Title One", Publisher, 2020. REFERENCES:\n'

@@ -14,6 +14,7 @@ from indexing.embedding_model import EmbeddingModel
 from matcher.recommendation_ranker import build_corpus, build_indices_for_keys, generate_recommendations
 from matcher.reference_resolver import resolve_all
 from syllabus.syllabus_parser import parse_syllabus_pdf
+from utils.discovery import find_pdfs
 from utils.logger import log, section
 
 
@@ -28,11 +29,7 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     section("1. Parsing syllabi")
-    syllabus_paths = sorted(
-        os.path.join(args.syllabi_dir, f)
-        for f in os.listdir(args.syllabi_dir)
-        if f.lower().endswith(".pdf")
-    )
+    syllabus_paths = find_pdfs(args.syllabi_dir)
     courses = []
     for path in syllabus_paths:
         courses.extend(parse_syllabus_pdf(path))
